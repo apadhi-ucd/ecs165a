@@ -21,7 +21,7 @@ class Query:
     # Return False if record doesn't exist or is locked due to 2PL
     """
     def delete(self, primary_key):
-        pass
+        return self.table.delete_record(primary_key)
     
     
     """
@@ -78,7 +78,11 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select(self, search_key, search_key_index, projected_columns_index):
-        pass
+        records = self.table.select_record(search_key, search_key_index)
+        if records:
+            return [Record(r.rid, r.key, [r.columns[i] if projected_columns_index[i] else None for i in range(len(r.columns))]) for r in records]
+        else:
+            return []
 
     
     """
@@ -101,7 +105,7 @@ class Query:
     # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
     """
     def update(self, primary_key, *columns):
-        pass
+        return self.table.update_record(primary_key, columns)
 
     
     """
@@ -113,7 +117,7 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        pass
+        return self.table.sum_records(start_range, end_range, aggregate_column_index)
 
     
     """
