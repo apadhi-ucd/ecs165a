@@ -30,8 +30,42 @@ class Query:
     # Returns False if insert fails for whatever reason
     """
     def insert(self, *columns):
+        # Validate the number of columns provided matches the table's schema
+        if len(columns) != self.table.num_columns:
+            return False
+
+        # Create the initial schema encoding (all zeros).
+        # This encoding is often used to mark the status of columns (0 => unmodified).
         schema_encoding = '0' * self.table.num_columns
-        pass
+
+        # Assume that the primary key is the first column.
+        primary_key = columns[0]
+
+        # Check if the primary key already exists in the page directory.
+        if primary_key in self.table.page_directory:
+            return False
+
+        try:
+            # Generate a new record ID (RID) for the record.
+            rid = self.table.new_base_rid()
+
+            # Create a new record object (even if not used beyond writing, this is common practice).
+            new_record = Record(rid, primary_key, columns, schema_encoding)
+
+            # Write the record data into the base pages of the table.
+            self.table.base_write(rid, columns)
+
+            # Update the page directory: map the primary key to its record ID.
+            self.table.page_directory[primary_key] = rid
+
+            # Insert the new record into the index using the primary key.
+            self.table.index.insert(primary_key, rid)
+
+            return True
+
+        except Exception:
+            # If there is any error during insertion, return False.
+            return False
 
     
     """
