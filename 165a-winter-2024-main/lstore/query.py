@@ -92,12 +92,46 @@ class Query:
     # :param projected_columns_index: what columns to return. array of 1 or 0 values.
     # :param relative_version: the relative version of the record you need to retreive.
     # Returns a list of Record objects upon success
-    # Returns False if record locked by TPL
+    # Returns Empty List if record locked by TPL
     # Assume that select will never be called on a key that doesn't exist
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
-        pass
-
+        try:
+        # If searching by primary key (optimization)
+        if search_key_index == 0:
+            if search_key not in self.table.page_directory:
+                return []
+            
+            rid = self.table.page_directory[search_key]
+            # Read specific version of the record
+            columns = self.table.read_version(rid, relative_version)
+            
+            if columns:
+                # Project only the requested columns
+                projected_columns = [
+                    columns[i] if projected_columns_index[i] else None 
+                    for i in range(len(columns))
+                ]
+                return [Record(rid, search_key, projected_columns)]
+            return []
+            
+        # If searching by another column
+        matching_records = []
+        for primary_key, rid in self.table.page_directory.items():
+            columns = self.table.read_version(rid, relative_version)
+            
+            if columns and columns[search_key_index] == search_key:
+                # Project only the requested columns
+                projected_columns = [
+                    columns[i] if projected_columns_index[i] else None 
+                    for i in range(len(columns))
+                ]
+                matching_records.append(Record(rid, primary_key, projected_columns))
+                
+        return matching_records
+        
+    except Exception:
+        return []    
     
     """
     # Update a record with specified key and columns
@@ -130,8 +164,30 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
-        pass
-
+        try:
+        sum_result = 0
+        records_found = False
+        
+        # Iterate through page directory in sorted order for primary keys
+        for primary_key in sorted(self.table.page_directory.keys()):
+            # Check if key is within range (inclusive)
+            if start_range <= primary_key <= end_range:
+                records_found = True
+                rid = self.table.page_directory[primary_key]
+                
+                # Use read_version instead of read_record to get specific version
+                columns = self.table.read_version(rid, relative_version)
+                
+                if columns:
+                    # Add the value from the specified column
+                    value = columns[aggregate_column_index]
+                    if value is not None:  # Handle NULL values
+                        sum_result += value
+        
+        return sum_result if records_found else False
+        
+    except Exception:
+        return False
     
     """
     incremenets one column of the record
