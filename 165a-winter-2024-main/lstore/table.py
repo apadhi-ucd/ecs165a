@@ -1,5 +1,5 @@
 from lstore.index import Index
-from lstore.page_range import PageRange
+from lstore.page_range  import PageRange
 from time import time
 import bisect
 
@@ -27,8 +27,8 @@ class Table:
     def __init__(self, name, num_columns, key):
         self.name = name
         self.key = key
-        self.num_columns = num_columns
-        self.page_directory = {}                        # Maps record IDs to their corresponding page ranges
+        self.num_columns = num_columns 
+        self.lineage = {}                        # Maps record IDs to their corresponding page ranges
         self.index = Index(self)                        # Index structure for fast lookups
         self.page_ranges = [PageRange(num_columns)]     # List of page ranges
         self.sorted_keys = []                           # Sorted list of keys for efficient searching
@@ -40,7 +40,7 @@ class Table:
     # Essentially this merge function combines tail pages into a base page to optimize space --> it gets
     # the most recent tail pages and combines it with the base page
     # I don't think we need this for milestone 1
-    def __merge(self): 
+    def merge(self): 
         print("merge is happening")
         pass
 
@@ -50,34 +50,34 @@ class Table:
 
     # Be able to insert new records and not sure what parameters would 
     # Idea is to first find a base page with space, if not create a new base page
-    # Can track records using page_directory
-        """
-        Inserts a new record into the table.
-        - Finds a base page with available space.
-        - If no space is available, creates a new base page.
-        - Updates page_directory and sorted_keys.
-        - Bisect is used to keep keys sorted for efficient searching.
-        - bisect.insort keeps keys sorted when a new record is inserted
+    # Can track records using lineage
+    """
+    Inserts a new record into the table.
+    - Finds a base page with available space.
+    - If no space is available, creates a new base page.
+    - Updates lineage and sorted_keys.
+    - Bisect is used to keep keys sorted for efficient searching.
+    - bisect.insort keeps keys sorted when a new record is inserted
         
-        :param values: Values of the record to be inserted.
-        :return: True if insertion is successful, False if the record already exists.
-        """
-    def __insert(self, *values): 
+    :param values: Values of the record to be inserted.
+    :return: True if insertion is successful, False if the record already exists.
+    """
+    def insert(self, *values): 
         record_id = values[self.key]    # Assuming the key is the first value in the tuple
-        if record_id in self.page_directory:
+        if record_id in self.lineage:
             return False     # Record already exists
         
         # Attempt to insert into an existing page range
         for page_range in self.page_ranges:
             if page_range.insert(values):
-                self.page_directory[record_id] = page_range
+                self.lineage[record_id] = page_range
                 bisect.insort(self.sorted_keys, record_id)     # Keep keys sorted
                 return True
         
         new_range = PageRange(self.num_columns)
         new_range.insert(values)
         self.page_ranges.append(new_range)
-        self.page_directory[record_id] = new_range
+        self.lineage[record_id] = new_range
         bisect.insort(self.sorted_keys, record_id)    # Keep keys sorted
         return True
 
@@ -86,29 +86,83 @@ class Table:
 
 
 
-    # Handles any updates from the base page to the tail page and be able to track page_directory
-    # Can add another def or include another function to keep track of page_directory def __get_record -->
-    # finds latest version using page_directory (page_directory) --> return latest updated version 
-    # Purpose: Finds latest version --> create new tail page if needed --> updates page_directory in page_directory
+    # Handles any updates from the base page to the tail page and be able to track lineage
+    # Can add another def or include another function to keep track of lineage def __get_record -->
+    # finds latest version using lineage (lineage) --> return latest updated version 
+    # Purpose: Finds latest version --> create new tail page if needed --> updates lineage in lineage
     """
     Updates an existing record by adding a new version in the tail page.
-    - Looks up the record in page_directory.
+    - Looks up the record in lineage.
     - Creates a new version and updates metadata.
         
     :param record_id: ID of the record to update.
     :param new_values: Updated values for the record.
     :return: True if update is successful, False if record is not found.
     """
-    def __update(self, record_id, *new_values): 
-        if record_id not in self.page_directory:
+    def update(self, record_id, *new_values): 
+        if record_id not in self.lineage:
             return False
         
-        page_range = self.page_directory[record_id]
+        page_range = self.lineage[record_id]
         version = len(page_range.tail_pages[-1].version_metadata)  # Assign version number
-        page_range.update(new_values, version)
+        original_record = self.select_version(record_id, 0, [1] * self.num_columns, -1)  # Retrieve latest record
+        page_range.update(original_record, new_values, version)
         return True
     
+    """
+    Finds page range that record is in, and sends request to the page range to delete it.
+        
+    :param record_id: The index of the record to delete.
+    """ 
+    def delete(self, record_id):
+        if record_id not in self.lineage:
+            return False
+        
+        page_range = self.lineage[record_id]
+        return page_range.delete(self.sorted_keys.index(record_id))
     
+
+    """
+    Retrieves a specific version of a record based on its ID.
+
+    - Uses lineage to find the correct page range.
+    - Uses versioning to retrieve the correct record.
+
+    :param record_id: ID of the record to retrieve.
+    :param projected_columns: Columns to project.
+    :param version: Version of the record to retrieve.
+    """    
+    def select_version(self, record_id, projected_columns, version=-1):
+        if record_id not in self.lineage:
+            return None
+        
+        page_range = self.lineage[record_id]
+        page = page_range.tail_pages[version] if version < 0 else page_range.base_pages[0]
+        return page.get_record(record_id, projected_columns)
+    
+    """
+    Retrieves a range of records based on their keys.
+    - Uses binary search to find the correct range.
+    - Iterates through the range to retrieve records.
+
+    :param start_key: Starting key of the range.
+    :param end_key: Ending key of the range.
+    :param column: Column to project.
+    :param version: Version of the records to retrieve.
+    """    
+    def sum_version(self, start_key, end_key, column, version=-1):
+        start_index = bisect.bisect_left(self.sorted_keys, start_key)
+        end_index = bisect.bisect_right(self.sorted_keys, end_key)
+        keys_in_range = self.sorted_keys[start_index:end_index]
+        
+        total = 0
+        for key in keys_in_range:
+            record = self.select_version(key, column, [1] * self.num_columns, version)
+            total += record[column] if record and record[column] is not None else 0
+        
+        return total
+    
+
 """
 
 Notes about Tables 
