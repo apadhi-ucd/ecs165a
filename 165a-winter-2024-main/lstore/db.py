@@ -3,13 +3,13 @@ from lstore.table import Table
 class Database():
 
     def __init__(self):
-        self.tables = []
-        pass
+        self.tables = {} # changed from list to dictionary to allow for O(1) lookup time
 
     # Not required for milestone1
     def open(self, path):
         pass
 
+    # Not required for milestone1
     def close(self):
         pass
 
@@ -21,13 +21,16 @@ class Database():
     """
     def create_table(self, name, num_columns, key_index):
         # Check if table name already exists
-        for table in self.tables:
-            if table.name == name:
-                return None  # Table name must be unique
+        if name in self.tables:
+            raise Exception("ERROR: Table already exists, Table name must be unique") # Table name must be unique
 
-        table = Table(name, num_columns, key_index)
-        self.tables.append(table)  # Append table to list
-        return table
+        # Create a new local table
+        tb = Table(name, num_columns, key_index)
+        self.tables[name] = tb  # pushing the new local table in the database
+
+        # Return the created table
+        return tb
+    
 
 
     
@@ -35,18 +38,18 @@ class Database():
     # Deletes the specified table
     """
     def drop_table(self, name):
-        for i, table in enumerate(self.tables):
-            if table.name == name:
-                del self.tables[i]  # Remove table from the list
-                return True
-        return False  # Table not found
+       # Check if table name exists
+        if name in self.tables:
+            raise Exception("ERROR: Table DNE") # Table name doesn't exist
+        
+        # Otherwise, delete the table
+        del self.tables[name]
 
+        # Return True in case assertion is needed later
+        return True
     
     """
     # Returns table with the passed name
     """
     def get_table(self, name):
-        for table in self.tables:
-            if table.name == name:
-                return table  # Return matching table
-        return None  # Table not found
+        return self.tables[name]
