@@ -47,40 +47,44 @@ class Table:
 
 
 
-
-    # Be able to insert new records and not sure what parameters would 
-    # Idea is to first find a base page with space, if not create a new base page
-    # Can track records using lineage
-    """
-    Inserts a new record into the table.
-    - Finds a base page with available space.
-    - If no space is available, creates a new base page.
-    - Updates lineage and sorted_keys.
-    - Bisect is used to keep keys sorted for efficient searching.
-    - bisect.insort keeps keys sorted when a new record is inserted
-        
-    :param values: Values of the record to be inserted.
-    :return: True if insertion is successful, False if the record already exists.
-    """
-    def insert(self, *values): 
+    
+    def insert(self, *values):
         record_id = values[self.key]    # Assuming the key is the first value in the tuple
         if record_id in self.lineage:
             return False     # Record already exists
         
+        # Generate a unique RID for the new record
+        rid = len(self.sorted_keys)  # Using length as a simple RID generator
+        
         # Attempt to insert into an existing page range
         for page_range in self.page_ranges:
             if page_range.insert(values):
+                # Update the lineage
                 self.lineage[record_id] = page_range
-                bisect.insort(self.sorted_keys, record_id)     # Keep keys sorted
+                bisect.insort(self.sorted_keys, record_id)
+                
+                # Update indices for all indexed columns
+                for col_index in range(self.num_columns):
+                    if self.index.indices[col_index] is not None:
+                        self.index.insert_entry(col_index, values[col_index], rid)
+                
                 return True
         
+        # If no existing page range has space, create a new one
         new_range = PageRange(self.num_columns)
-        new_range.insert(values)
-        self.page_ranges.append(new_range)
-        self.lineage[record_id] = new_range
-        bisect.insort(self.sorted_keys, record_id)    # Keep keys sorted
-        return True
-
+        if new_range.insert(values):
+            self.page_ranges.append(new_range)
+            self.lineage[record_id] = new_range
+            bisect.insort(self.sorted_keys, record_id)
+            
+            # Update indices for the new page range
+            for col_index in range(self.num_columns):
+                if self.index.indices[col_index] is not None:
+                    self.index.insert_entry(col_index, values[col_index], rid)
+            
+            return True
+        
+        return False  # Insert failed
 
 
 
