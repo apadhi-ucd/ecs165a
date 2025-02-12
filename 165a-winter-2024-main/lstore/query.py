@@ -11,7 +11,6 @@ class Query:
     """
     def __init__(self, table):
         self.table = table
-        pass
 
     
     """
@@ -30,42 +29,10 @@ class Query:
     # Returns False if insert fails for whatever reason
     """
     def insert(self, *columns):
-        # Validate the number of columns provided matches the table's schema
         if len(columns) != self.table.num_columns:
             return False
+        return self.table.insert(*columns)
 
-        # Create the initial schema encoding (all zeros).
-        # This encoding is often used to mark the status of columns (0 => unmodified).
-        schema_encoding = '0' * self.table.num_columns
-
-        # Assume that the primary key is the first column.
-        primary_key = columns[0]
-
-        # Check if the primary key already exists in the page directory.
-        if primary_key in self.table.page_directory:
-            return False
-
-        try:
-            # Generate a new record ID (RID) for the record.
-            rid = self.table.new_base_rid()
-
-            # Create a new record object (even if not used beyond writing, this is common practice).
-            new_record = Record(rid, primary_key, columns, schema_encoding)
-
-            # Write the record data into the base pages of the table.
-            self.table.base_write(rid, columns)
-
-            # Update the page directory: map the primary key to its record ID.
-            self.table.page_directory[primary_key] = rid
-
-            # Insert the new record into the index using the primary key.
-            self.table.index.insert(primary_key, rid)
-
-            return True
-
-        except Exception:
-            # If there is any error during insertion, return False.
-            return False
 
     
     """
@@ -78,9 +45,9 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select(self, search_key, search_key_index, projected_columns_index):
-        records = self.table.select_record(search_key, search_key_index)
-        if records:
-            return [Record(r.rid, r.key, [r.columns[i] if projected_columns_index[i] else None for i in range(len(r.columns))]) for r in records]
+        record = self.table.select(search_key, search_key_index, projected_columns_index)
+        if record:
+            return record
         else:
             return []
 
@@ -97,39 +64,7 @@ class Query:
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         try:
-        # If searching by primary key (optimization)
-            if search_key_index == 0:
-                if search_key not in self.table.page_directory:
-                    return []
-            
-                rid = self.table.page_directory[search_key]
-                # Read specific version of the record
-                columns = self.table.read_version(rid, relative_version)
-            
-                if columns:
-                    # Project only the requested columns
-                    projected_columns = [
-                        columns[i] if projected_columns_index[i] else None 
-                        for i in range(len(columns))
-                    ]
-                    return [Record(rid, search_key, projected_columns)]
-                return []
-            
-            # If searching by another column
-            matching_records = []
-            for primary_key, rid in self.table.page_directory.items():
-                columns = self.table.read_version(rid, relative_version)
-            
-                if columns and columns[search_key_index] == search_key:
-                    # Project only the requested columns
-                    projected_columns = [
-                        columns[i] if projected_columns_index[i] else None 
-                        for i in range(len(columns))
-                    ]
-                    matching_records.append(Record(rid, primary_key, projected_columns))
-                
-            return matching_records
-        
+            return self.table.select_version(search_key, search_key_index, projected_columns_index, relative_version)        
         except Exception:
             return []    
     
@@ -139,7 +74,7 @@ class Query:
     # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
     """
     def update(self, primary_key, *columns):
-        return self.table.update_record(primary_key, columns)
+        return self.table.update(primary_key, *columns)
 
     
     """
@@ -151,7 +86,7 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        return self.table.sum_records(start_range, end_range, aggregate_column_index)
+        return self.table.sum_version(start_range, end_range, aggregate_column_index)
 
     
     """
@@ -165,26 +100,7 @@ class Query:
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
         try:
-            sum_result = 0
-            records_found = False
-        
-            # Iterate through page directory in sorted order for primary keys
-            for primary_key in sorted(self.table.page_directory.keys()):
-                # Check if key is within range (inclusive)
-                if start_range <= primary_key <= end_range:
-                    records_found = True
-                    rid = self.table.page_directory[primary_key]
-                
-                    # Use read_version instead of read_record to get specific version
-                    columns = self.table.read_version(rid, relative_version)
-                
-                    if columns:
-                        # Add the value from the specified column
-                        value = columns[aggregate_column_index]
-                        if value is not None:  # Handle NULL values
-                            sum_result += value
-        
-            return sum_result if records_found else False
+            return self.table.sum_version(start_range, end_range, aggregate_column_index, relative_version)
         
         except Exception:
             return False

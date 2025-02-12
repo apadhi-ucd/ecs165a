@@ -21,7 +21,7 @@ class Database():
     """
     def create_table(self, name, num_columns, key_index):
         table = Table(name, num_columns, key_index)
-        self.tables[name] = table
+        self.tables[name] = table.name
         return table
 
     
