@@ -168,23 +168,4 @@ class Table:
     
 
 """
-
-Notes about Tables 
-
-Here's the link for the gpt I used https://chatgpt.com/share/67aa91a6-4ef0-8009-8bad-cb069d267768
-
-Purpose of a table:
-    * Store records (Base Page) --> Original 
-    * Get Updated information (Tail Pages) --> When records are updated it goes to tail pages
-    * Retrieve latest version efficiently 
-    * Support Multiple pages
-    * Track Original (Base Page) to Updated Versions (Tail Pages)
-
-Implementation:
-    * The skeleton already provides the table and records so from there we just need to implement base pages and 
-      tail pages and we can add this under the table class
-    * 
-    
- 
-"""
  
