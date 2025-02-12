@@ -7,6 +7,9 @@ Rather than implementing a B Tree we used a PyPi Library
 from BTrees.OOBTree import OOBTree 
 
 class Index:
+    RID_COLUMN = 1
+    METADATA_COLUMNS = 4
+
     """
     A class that manages database indices using B-trees for efficient record lookup
     """
@@ -28,13 +31,14 @@ class Index:
         - Gets record ID from the record
         - For each indexed column, adds the record ID to the corresponding B-tree
         """
-        rid = record[config.RID_COLUMN]
-        for i, column_index in enumerate(self.indices):
-            if column_index is not None:  # If this column has an index
-                key = record[i + config.METADATA_COLUMNS]
-                if key not in column_index:
-                    column_index[key] = set()  # Create new set if key doesn't exist
-                column_index[key].add(rid)     # Add record ID to the set
+        record_id = record[self.RID_COLUMN]
+
+        for row, col in enumerate(self.indices):
+            if col is not None:
+                key = record[row + self.METADATA_COLUMNS]
+                if key not in col:
+                    col[key] = set()
+                col[key].add(record_id)
                 
     def delete(self, record):
         """
@@ -43,16 +47,17 @@ class Index:
         - Removes the record ID from all indexed columns
         - Removes empty sets from the B-trees
         """
-        rid = record[config.RID_COLUMN]
-        for i, column_index in enumerate(self.indices):
-            if column_index is not None:
-                key = record[i + config.METADATA_COLUMNS]
-                if key in column_index:
-                    column_index[key].remove(rid)  # Remove record ID from set
-                    if not column_index[key]:      # If set is empty
-                        del column_index[key]      # Remove the key entirely
-                else:
-                    raise Exception("Key not found in index")
+        record_id = record[self.RID_COLUMN]
+        for col, tree in enumerate(self.indices):
+            if tree is not None:
+                value = record[col + self.METADATA_COLUMNS]
+                # If the value exists in the b-tree, attempt to remove the record id.
+                if value in tree:
+                    tree[value].discard(record_id)
+                    # If the set is empty after deletion, remove the key from the tree.
+                    if not tree[value]:
+                        del tree[value]
+                    
                     
     def locate(self, column, value):
         """
