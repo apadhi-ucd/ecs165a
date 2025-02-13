@@ -40,13 +40,10 @@ class Database():
     def drop_table(self, name):
        # Check if table name exists
         if name in self.tables:
-            raise Exception("ERROR: Table DNE") # Table name doesn't exist
-        
-        # Otherwise, delete the table
-        del self.tables[name]
-
-        # Return True in case assertion is needed later
-        return True
+            del self.tables[name]
+            return True
+            
+        return False
     
     """
     # Returns table with the passed name
