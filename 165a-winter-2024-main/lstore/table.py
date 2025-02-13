@@ -54,7 +54,7 @@ class Table:
         """
         Adds a new page range when the current one is full.
         """
-        if self.page_ranges[-1].has_base_page_capacity():
+        if self.page_ranges[-1].has_capacity(is_base = True):
             return
         
         self.page_ranges.append(PageRange(self.num_columns))
