@@ -1,40 +1,52 @@
 """
-Database query operations.
-Handles database operations including insert, update, delete, and select.
-Returns False on failure, True or requested data on success.
+Query operations for the database.
+Handles all database operations on tables including inserts, updates, deletes, and queries.
+All failed queries return False.
+All successful queries return True or the requested data.
 """
 import time
-from lstore.table import Table, Record
-from lstore.index import Index
 
-SCHEMA_ENCODING_COLUMN = 3
-INDIRECTION_COLUMN = 0
-METADATA_COLUMNS = 4
-RID_COLUMN = 1
+from lstore.table import Table, Record
+import lstore.config as config
+from lstore.index import Index
+from datetime import datetime
+
 
 class Query:
     """
-    Handles all database table operations
+    Query class that handles all database operations on a table
     """
-
     def __init__(self, table):
         """
-        Initialize with target table
+        Initialize query object for a specific table
+        :param table: Table     #The table this query will operate on
         """
+        # Initialize table reference
         self.table = table
 
     def create_record(self, raw_data, primary_key):
         """
-        Create Record object from raw data
+        Creates a Record object from raw data values
+        :param raw_data: list     #Raw record values including metadata columns
+        :param primary_key: int   #Primary key value for the record
+        :return: Record          #Constructed Record object with metadata and data
         """
-        schema_value = raw_data[SCHEMA_ENCODING_COLUMN]
+        # Convert timestamp from epoch to datetime
+        record_timestamp = datetime.fromtimestamp(float(raw_data[config.TIMESTAMP_COLUMN]))
+        
+        # Convert schema encoding from integer to binary list
+        schema_value = raw_data[config.SCHEMA_ENCODING_COLUMN]
         column_count = self.table.num_columns
         schema_encoding = [int(bit) for bit in f"{schema_value:0{column_count}b}"]
-        data_values = raw_data[METADATA_COLUMNS:]
         
+        # Extract data values (excluding metadata)
+        data_values = raw_data[config.METADATA_COLUMNS:]
+        
+        # Create and return Record object
         return Record(
-            indirection=raw_data[INDIRECTION_COLUMN],
-            rid=raw_data[RID_COLUMN],
+            indirection=raw_data[config.INDIRECTION_COLUMN],
+            rid=raw_data[config.RID_COLUMN],
+            timestamp=record_timestamp,
             schema_encoding=schema_encoding,
             key=primary_key,
             columns=data_values
@@ -42,21 +54,32 @@ class Query:
 
     def get_base_records(self, key_value, key_column_index, column_filter):
         """
-        Get base records matching the key value
+        Retrieves base records matching the search key from storage
+        :param key_value: int           #Value to search for
+        :param key_column_index: int    #Index of column to search in
+        :param column_filter: list      #Bitmap indicating which columns to return (1s and 0s)
+        :return: list                   #List of matching Record objects
         """
         matching_records = []
-        matching_rids = self.table.index.locate(key_column_index, key_value)
         
+        # Get RIDs from index
+        matching_rids = self.table.index.locate(key_column_index, key_value)
         if matching_rids is None:
             return []
 
+        # Fetch each record by RID
         for record_id in matching_rids:
+            # Get record location from page directory
             page_range_idx, base_page_idx, slot_idx = self.table.page_directory[record_id]
+            
+            # Read raw record data from storage
             raw_record_data = self.table.page_ranges[page_range_idx].read_base_record(
                 base_page_idx, 
                 slot_idx, 
                 column_filter
             )
+            
+            # Convert raw data to Record object
             record_object = self.create_record(raw_record_data, key_value)
             matching_records.append(record_object)
 
@@ -64,25 +87,33 @@ class Query:
 
     def insert(self, *columns):
         """
-        Insert new record into table
+        Inserts a record into the table
+        :param columns: *args     #Values for each column
+        :return: bool           #True if successful, False otherwise
         """
         try:
+            # Validate column count
             if len(columns) != self.table.num_columns:
                 return False
 
+            # Get new RID and current page range
             rid = self.table.new_rid()
             page_range = self.table.page_ranges[self.table.page_ranges_index]
 
-            new_record = [None] * METADATA_COLUMNS
-            new_record[INDIRECTION_COLUMN] = 0
-            new_record[RID_COLUMN] = rid
-            new_record[SCHEMA_ENCODING_COLUMN] = 0
+            # Create record with metadata
+            new_record = [None] * config.METADATA_COLUMNS
+            new_record[config.INDIRECTION_COLUMN] = 0
+            new_record[config.RID_COLUMN] = rid
+            new_record[config.TIMESTAMP_COLUMN] = int(time.time())
+            new_record[config.SCHEMA_ENCODING_COLUMN] = 0
             new_record.extend(columns)
 
+            # Write record and update mappings
             index, slot = page_range.write_base_record(new_record)
             self.table.page_directory[rid] = (self.table.page_ranges_index, index, slot)
             self.table.index.add(new_record)
 
+            # Prepare for next insert
             self.table.add_new_page_range()
             return True
         except:
@@ -90,8 +121,13 @@ class Query:
 
     def select(self, search_key, search_key_index, projected_columns_index):
         """
-        Select records matching search criteria
+        Retrieves records matching the search criteria
+        :param search_key: int             #Value to search for
+        :param search_key_index: int       #Column to search in
+        :param projected_columns_index: list #Columns to return (1s and 0s)
+        :return: list                      #List of matching Record objects
         """
+        # Use select_version with default version (0)
         return self.select_version(search_key, search_key_index, projected_columns_index, 0)
 
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
@@ -163,7 +199,10 @@ class Query:
 
     def createSchemaEncoding(self, columns, existing_schema=None):
         """
-        Create or update schema encoding for record updates
+        Creates or updates schema encoding for record updates
+        :param columns: list     #New column values
+        :param existing_schema: list  #Existing schema to update (optional)
+        :return: tuple          #(schema list, schema number)
         """
         if existing_schema is None:
             schema = [1 if col is not None else 0 for col in columns]
@@ -176,70 +215,94 @@ class Query:
 
     def createTailRecord(self, tail_rid, indirection_rid, columns, schema_num, prev_record=None):
         """
-        Create new tail record with metadata
+        Creates a new tail record with metadata and column values
+        :param tail_rid: int       #New tail record ID
+        :param indirection_rid: int #RID this record points to
+        :param columns: list       #New column values
+        :param schema_num: int     #Schema encoding number
+        :param prev_record: list   #Previous record for value inheritance (optional)
+        :return: list             #Complete tail record
         """
-        tail_record = [None] * METADATA_COLUMNS
-        tail_record[INDIRECTION_COLUMN] = indirection_rid
-        tail_record[RID_COLUMN] = tail_rid
-        tail_record[SCHEMA_ENCODING_COLUMN] = schema_num
-    
+        tail_record = [None] * config.METADATA_COLUMNS
+        tail_record[config.INDIRECTION_COLUMN] = indirection_rid
+        tail_record[config.RID_COLUMN] = tail_rid
+        tail_record[config.TIMESTAMP_COLUMN] = int(time.time())
+        tail_record[config.SCHEMA_ENCODING_COLUMN] = schema_num
+
+        # Add column values
         if prev_record is None:
             tail_record.extend(col if col is not None else 0 for col in columns)
         else:
             for i, col in enumerate(columns):
                 if col is not None:
                     tail_record.append(col)
-                elif prev_record[i + METADATA_COLUMNS]:
-                    tail_record.append(prev_record[i + METADATA_COLUMNS])
+                elif prev_record[i + config.METADATA_COLUMNS]:
+                    tail_record.append(prev_record[i + config.METADATA_COLUMNS])
                 else:
                     tail_record.append(0)
-    
+
         return tail_record
 
     def writeTailRecord(self, page_range, page_range_index, tail_record):
         """
-        Write tail record and update directory
+        Writes tail record to storage and updates page directory
+        :param page_range: PageRange  #Page range to write to
+        :param page_range_index: int  #Index of page range
+        :param tail_record: list     #Tail record to write
+        :return: tuple              #(tail_index, tail_slot)
         """
         tail_index, tail_slot = page_range.write_tail_record(tail_record)
-        self.table.page_directory[tail_record[RID_COLUMN]] = (page_range_index, tail_index, tail_slot)
+        self.table.page_directory[tail_record[config.RID_COLUMN]] = (page_range_index, tail_index, tail_slot)
         return tail_index, tail_slot
-    
+
     def updateBaseRecordMetadata(self, page_range, base_page_index, base_slot, tail_rid, schema_num):
         """
-        Update base record metadata after tail record creation
+        Updates base record's metadata after a tail record is created
+        :param page_range: PageRange  #Page range containing base record
+        :param base_page_index: int   #Index of base page
+        :param base_slot: int         #Slot in base page
+        :param tail_rid: int          #RID of new tail record
+        :param schema_num: int        #New schema encoding
         """
-        page_range.update_base_record_column(base_page_index, base_slot, INDIRECTION_COLUMN, tail_rid)
-        page_range.update_base_record_column(base_page_index, base_slot, SCHEMA_ENCODING_COLUMN, schema_num)
+        page_range.update_base_record_column(base_page_index, base_slot, config.INDIRECTION_COLUMN, tail_rid)
+        page_range.update_base_record_column(base_page_index, base_slot, config.SCHEMA_ENCODING_COLUMN, schema_num)
 
     def handleFirstUpdate(self, page_range, base_record, page_range_index, base_page_index, base_slot, columns):
         """
-        Handle first update to a record
+        Handles the first update to a record
         """
         tail_rid = self.table.new_rid()
         schema, schema_num = self.createSchemaEncoding(columns)
         
+        # Create and write tail record
         tail_record = self.createTailRecord(
             tail_rid,
-            base_record[RID_COLUMN],
+            base_record[config.RID_COLUMN],
             columns,
             schema_num
         )
         self.writeTailRecord(page_range, page_range_index, tail_record)
+        
+        # Update base record metadata
         self.updateBaseRecordMetadata(page_range, base_page_index, base_slot, tail_rid, schema_num)
 
     def handleSubsequentUpdate(self, page_range, base_record, page_range_index, base_page_index, base_slot, columns):
         """
-        Handle updates to previously updated record
+        Handles updates to a record that has previous updates
         """
-        existing_schema = [int(bit) for bit in f"{base_record[SCHEMA_ENCODING_COLUMN]:0{self.table.num_columns}b}"]
-        latest_tail_rid = base_record[INDIRECTION_COLUMN]
+        # Get existing schema and latest tail record
+        existing_schema = [int(bit) for bit in f"{base_record[config.SCHEMA_ENCODING_COLUMN]:0{self.table.num_columns}b}"]
+        latest_tail_rid = base_record[config.INDIRECTION_COLUMN]
         
+        # Read latest tail record
         page_range_index, latest_tail_index, latest_tail_slot = self.table.page_directory[latest_tail_rid]
         latest_tail_record = page_range.read_tail_record(latest_tail_index, latest_tail_slot, existing_schema)
         
+        # Create new tail record
         new_tail_rid = self.table.new_rid()
         schema, schema_num = self.createSchemaEncoding(columns, existing_schema)
         
+        # Create and write new tail record
         new_tail_record = self.createTailRecord(
             new_tail_rid,
             latest_tail_rid,
@@ -248,6 +311,8 @@ class Query:
             latest_tail_record
         )
         self.writeTailRecord(page_range, page_range_index, new_tail_record)
+        
+        # Update base record metadata
         self.updateBaseRecordMetadata(page_range, base_page_index, base_slot, new_tail_rid, schema_num)
 
     def update(self, primary_key, *columns):
@@ -402,22 +467,26 @@ class Query:
             return total_sum if found_records else False
         except:
             return False
-    
+
     def increment(self, key, column):
         """
-        Increment value in record
+        Increments a value in a record
+        :param key: int     #Primary key of record to increment
+        :param column: int  #Column to increment
+        :return: bool     #True if successful, False otherwise
         """
         try:
+            # Get record to increment
             records = self.select(key, self.table.key, [1] * self.table.num_columns)
             if not records or records is False:
                 return False
 
+            # Prepare update values
             record = records[0]
             updated_columns = [None] * self.table.num_columns
             updated_columns[column] = record[column] + 1
             
+            # Perform update
             return self.update(key, *updated_columns)
         except:
             return False
-
-
