@@ -1,8 +1,9 @@
-PAGE_SIZE = 4096 * 16  # 64KB
-RECORD_SIZE = 8  # Each record is 8 bytes
-RECORDS_PER_PAGE = PAGE_SIZE // RECORD_SIZE
 
 class Page:
+
+    PAGE_SIZE = 4096 * 16  # 64KB
+    RECORD_SIZE = 8  # Each record is 8 bytes
+    RECORDS_PER_PAGE = PAGE_SIZE // RECORD_SIZE
 
     def __init__(self):
         self.num_records = 0
