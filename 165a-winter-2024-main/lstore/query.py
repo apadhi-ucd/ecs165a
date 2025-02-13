@@ -158,13 +158,13 @@ class UpdateOperations:
         return tail_record
 
     def write_tail_record(self, page_range, page_range_index, tail_record):
-        tail_index, tail_slot = page_range.write_tail_record(tail_record)
+        tail_index, tail_slot = page_range.write(tail_record, is_base=False)
         self.table.page_directory[tail_record[1]] = (page_range_index, tail_index, tail_slot)
         return tail_index, tail_slot
 
     def update_base_record_metadata(self, page_range, base_page_index, base_slot, tail_rid, schema_num):
-        page_range.update_base_record_column(base_page_index, base_slot, 0, tail_rid)
-        page_range.update_base_record_column(base_page_index, base_slot, 3, schema_num)
+        page_range.update(base_page_index, base_slot, 0, tail_rid, is_base=True)
+        page_range.update(base_page_index, base_slot, 3, schema_num, is_base=True)
 
     def update(self, primary_key, *columns):
         try:
@@ -175,19 +175,19 @@ class UpdateOperations:
             for rid in rids:
                 page_range_index, base_page_index, base_slot = self.table.page_directory[rid]
                 page_range = self.table.page_ranges[page_range_index]
-                base_record = page_range.read_base_record(base_page_index, base_slot, [0] * self.table.num_columns)
+                base_record = page_range.read(base_page_index, base_slot, [0] * self.table.num_columns, is_base=True)
 
                 if base_record[0] == 0:
                     tail_rid = self.table.new_rid()
                     schema, schema_num = self.create_schema_encoding(columns)
                     tail_record = self.create_tail_record(tail_rid, base_record[1], columns, schema_num)
-                    self.write_tail_record(page_range, page_range_index, tail_record)
+                    self.write_tail_record(page_range, page_range_index, is_base=False)
                     self.update_base_record_metadata(page_range, base_page_index, base_slot, tail_rid, schema_num)
                 else:
                     existing_schema = [int(bit) for bit in f"{base_record[3]:0{self.table.num_columns}b}"]
                     latest_tail_rid = base_record[0]
                     page_range_index, latest_tail_index, latest_tail_slot = self.table.page_directory[latest_tail_rid]
-                    latest_tail_record = page_range.read_tail_record(latest_tail_index, latest_tail_slot, existing_schema)
+                    latest_tail_record = page_range.read(latest_tail_index, latest_tail_slot, existing_schema, is_base=False)
                     new_tail_rid = self.table.new_rid()
                     schema, schema_num = self.create_schema_encoding(columns, existing_schema)
                     new_tail_record = self.create_tail_record(new_tail_rid, latest_tail_rid, columns, schema_num, latest_tail_record)
