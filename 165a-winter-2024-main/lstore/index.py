@@ -6,9 +6,10 @@ Rather than implementing a B Tree we used a PyPi Library
 
 from BTrees.OOBTree import OOBTree 
 
+RID_COLUMN = 1
+METADATA_COLUMNS = 4
+
 class Index:
-    RID_COLUMN = 1
-    METADATA_COLUMNS = 4
 
     """
     A class that manages database indices using B-trees for efficient record lookup
