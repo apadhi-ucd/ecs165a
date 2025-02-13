@@ -54,7 +54,7 @@ class Index:
                 value = record[col + self.METADATA_COLUMNS]
                 # If the value exists in the b-tree, attempt to remove the record id.
                 if value in tree:
-                    tree[value].discard(record_id)
+                    tree[value].remove(record_id)
                     # If the set is empty after deletion, remove the key from the tree.
                     if not tree[value]:
                         del tree[value]
