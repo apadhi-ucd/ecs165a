@@ -267,30 +267,27 @@ class Query:
                     is_base = True
                 )
 
-                # Create new tail record
-                tail_rid = self.table.new_rid()
-                schema, schema_num = self.createSchemaEncoding(columns)
-                
-                # Set indirection to previous version
-                tail_record = self.createTailRecord(
-                    tail_rid=tail_rid,
-                    indirection_rid=base_record[INDIRECTION_COLUMN] if base_record[INDIRECTION_COLUMN] != 0 
-                    else base_record[RID_COLUMN],
-                    columns=columns,
-                    schema_num=schema_num
-                )
-
-                # Write tail record
-                tail_idx, tail_slot = self.writeTailRecord(page_range, page_range_idx, tail_record)
-                
-                # Update base record's indirection
-                self.updateBaseRecordMetadata(
-                    page_range,
-                    base_page_idx,
-                    slot_idx,
-                    tail_rid,
-                    schema_num
-                )
+                # Handle update based on record state
+                if base_record[INDIRECTION_COLUMN] == 0:
+                    # First update to this record
+                    self.handleFirstUpdate(
+                        page_range, 
+                        base_record, 
+                        page_range_idx, 
+                        base_page_idx, 
+                        slot_idx, 
+                        columns
+                    )
+                else:
+                    # Record has previous updates
+                    self.handleSubsequentUpdate(
+                        page_range, 
+                        base_record, 
+                        page_range_idx, 
+                        base_page_idx, 
+                        slot_idx, 
+                        columns
+                    )
 
             return True
         except:
@@ -317,11 +314,19 @@ class Query:
                     is_base = True
                 )
 
+                if page_range_idx is None:
+                    return False
+
+                # Mark base record as deleted
+                base_rid = rid
+                page_range.update(base_page_idx, slot_idx, RID_COLUMN, 0, is_base = True)
                 # Follow indirection chain and delete all versions
                 current_rid = base_record[INDIRECTION_COLUMN]
-                while current_rid != 0:
+                while current_rid and current_rid != base_rid:
                     # Get tail record location
-                    curr_range_idx, tail_idx, tail_slot = self.table.page_directory[current_rid]
+                    page_range_idx, tail_idx, tail_slot = self.table.page_directory[current_rid]
+                    if page_range_idx is None:
+                        break
                     
                     # Read tail record to get next indirection
                     tail_record = self.table.page_ranges[curr_range_idx].read(
@@ -330,6 +335,7 @@ class Query:
                         [1] * self.table.num_columns,
                         is_base = True
                     )
+  
                     
                     # Mark tail record as deleted
                     self.table.page_ranges[curr_range_idx].update(
