@@ -35,7 +35,6 @@ class Query:
             columns=data_values
         )
 
-    # [Rest of the code remains exactly the same]
     def get_base_records(self, key_value, key_column_index, column_filter):
         """
         Get base records matching the key value
