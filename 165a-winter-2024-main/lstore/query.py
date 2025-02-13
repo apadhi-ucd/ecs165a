@@ -99,46 +99,53 @@ class Query:
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         """
         Retrieves a specific version of records matching the search criteria
+        :param search_key: int             #Value to search for
+        :param search_key_index: int       #Column to search in
+        :param projected_columns_index: list #Columns to return (1s and 0s)
+        :param relative_version: int        #Version to retrieve (negative for older versions)
+        :return: list                      #List of matching Record objects
         """
         try:
+            # Get base records
             base_records = self.get_base_records(search_key, search_key_index, projected_columns_index)
             versioned_records = []
 
+            # Process each base record
             for base_record in base_records:
+                # Handle records with no updates
                 if base_record.indirection == 0:
                     versioned_records.append(base_record)
                     continue
-                    
+
+                # Initialize version traversal
                 current_version = 0
                 current_tail_rid = base_record.indirection
                 should_return_base = False
 
-
+                # Get initial tail record
                 page_range_index, tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
-                current_tail_record = self.table.page_ranges[page_range_idx].read(
-                        tail_page_idx,
-                        slot_idx,
-                        projected_columns_index,
-                        is_base = False
-                    )
-                
-                # Follow indirection chain if record has updates
-                while current_record.indirection != 0 and current_version > relative_version:
+                current_tail_record = self.table.page_ranges[page_range_index].read_tail_record(
+                    tail_page_index, 
+                    tail_slot, 
+                    projected_columns_index
+                )
+
+                # Traverse the version chain
+                while current_version > relative_version:
                     if current_tail_record[INDIRECTION_COLUMN] == base_record.rid:
                         should_return_base = True
                         break
-                    # Get tail record using indirection pointer
-                    #current_tail_rid = current_tail_record[INDIRECTION_COLUMN]
-                    page_range_idx, tail_page_idx, slot_idx = self.table.page_directory[current_tail_record[INDIRECTION_COLUMN]]
-                    tail_record_data = self.table.page_ranges[page_range_idx].read(
-                        tail_page_idx,
-                        slot_idx,
-                        projected_columns_index,
-                        is_base = False
-                    )
-                    
 
+                    # Move to next version
+                    current_tail_rid = current_tail_record[INDIRECTION_COLUMN]
+                    page_range_index, tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
+                    current_tail_record = self.table.page_ranges[page_range_index].read_tail_record(
+                        tail_page_index, 
+                        tail_slot,
+                        projected_columns_index
+                    )
                     current_version -= 1
+
                 # Determine which record to return
                 if should_return_base or relative_version < current_version:
                     versioned_records.append(base_record)
@@ -295,68 +302,63 @@ class Query:
 
     def delete(self, primary_key):
         """
-        Deletes record(s) and their version chain using INDIRECTION_COLUMN
+        Deletes record(s) from the table
+        :param primary_key: int   #Primary key of record(s) to delete
+        :return: bool           #True if successful, False otherwise
         """
         try:
+            # Locate records to delete
             rids = self.table.index.locate(self.table.key, primary_key)
             if not rids:
                 return False
 
+            # Delete each matching record
             for rid in rids:
-                page_range_idx, base_page_idx, slot_idx = self.table.page_directory[rid]
-                page_range = self.table.page_ranges[page_range_idx]
+                # Get record location and data
+                page_range_index, base_page_index, base_slot = self.table.page_directory[rid]
+                page_range = self.table.page_ranges[page_range_index]
                 
                 # Read base record
-                base_record = page_range.read(
-                    base_page_idx,
-                    slot_idx,
-                    [1] * self.table.num_columns,
-                    is_base = True
+                base_record = page_range.read_base_record(
+                    base_page_index, 
+                    base_slot, 
+                    [1] * self.table.num_columns
                 )
 
-                if page_range_idx is None:
+                if page_range_index is None:
                     return False
 
                 # Mark base record as deleted
                 base_rid = rid
-                page_range.update(base_page_idx, slot_idx, RID_COLUMN, 0, is_base = True)
-                # Follow indirection chain and delete all versions
+                page_range.update_base_record_column(base_page_index, base_slot, RID_COLUMN, 0)
+
+                # Delete associated tail records
                 current_rid = base_record[INDIRECTION_COLUMN]
                 while current_rid and current_rid != base_rid:
                     # Get tail record location
-                    page_range_idx, tail_idx, tail_slot = self.table.page_directory[current_rid]
-                    if page_range_idx is None:
+                    page_range_index, tail_index, tail_slot = self.table.page_directory[current_rid]
+                    if page_range_index is None:
                         break
-                    
-                    # Read tail record to get next indirection
-                    tail_record = self.table.page_ranges[curr_range_idx].read(
-                        tail_idx,
+
+                    # Read and mark tail record as deleted
+                    tail_record = page_range.read_tail_record(
+                        tail_index, 
                         tail_slot,
-                        [1] * self.table.num_columns,
-                        is_base = True
+                        [0] * self.table.num_columns
                     )
-  
+                    page_range.update_tail_record_column(tail_index, tail_slot, RID_COLUMN, 0)
                     
-                    # Mark tail record as deleted
-                    self.table.page_ranges[curr_range_idx].update(
-                        tail_idx,
-                        tail_slot,
-                        RID_COLUMN,
-                        0,
-                        is_base = False
-                    )
-                    
-                    # Move to next version
+                    # Move to next tail record
                     current_rid = tail_record[INDIRECTION_COLUMN]
 
-                # Mark base record as deleted
-                page_range.update(base_page_idx, slot_idx, RID_COLUMN, 0, is_base = True)
+                # Clean up index and directory entries
                 self.table.index.delete(base_record)
                 self.table.page_directory[rid] = None
 
             return True
         except:
             return False
+
 
     def sum(self, start_range, end_range, aggregate_column_index):
         """
