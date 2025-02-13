@@ -5,6 +5,7 @@ Returns False on failure, True or requested data on success.
 """
 import time
 from lstore.table import Table, Record
+from lstore.index import Index
 
 class Query:
     """
