@@ -1,4 +1,5 @@
 from lstore.table import Table
+import lstore.config as config
 
 class Database():
 
