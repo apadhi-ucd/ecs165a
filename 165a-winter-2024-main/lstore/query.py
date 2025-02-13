@@ -94,7 +94,7 @@ class Query:
         """
         return self.select_version(search_key, search_key_index, projected_columns_index, 0)
 
-def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
+    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         """
         Retrieves a specific version of records matching the search criteria
         :param search_key: int             #Value to search for
