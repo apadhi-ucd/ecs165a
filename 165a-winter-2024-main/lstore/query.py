@@ -182,7 +182,7 @@ def select_version(self, search_key, search_key_index, projected_columns_index, 
         tail_record[INDIRECTION_COLUMN] = indirection_rid
         tail_record[RID_COLUMN] = tail_rid
         tail_record[SCHEMA_ENCODING_COLUMN] = schema_num
-
+    
         if prev_record is None:
             tail_record.extend(col if col is not None else 0 for col in columns)
         else:
@@ -193,7 +193,7 @@ def select_version(self, search_key, search_key_index, projected_columns_index, 
                     tail_record.append(prev_record[i + METADATA_COLUMNS])
                 else:
                     tail_record.append(0)
-
+    
         return tail_record
 
     def writeTailRecord(self, page_range, page_range_index, tail_record):
@@ -203,7 +203,7 @@ def select_version(self, search_key, search_key_index, projected_columns_index, 
         tail_index, tail_slot = page_range.write_tail_record(tail_record)
         self.table.page_directory[tail_record[RID_COLUMN]] = (page_range_index, tail_index, tail_slot)
         return tail_index, tail_slot
-
+    
     def updateBaseRecordMetadata(self, page_range, base_page_index, base_slot, tail_rid, schema_num):
         """
         Update base record metadata after tail record creation
