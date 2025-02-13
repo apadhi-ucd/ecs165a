@@ -94,23 +94,33 @@ class Query:
         """
         return self.select_version(search_key, search_key_index, projected_columns_index, 0)
 
-    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
+def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         """
-        Select specific version of records matching criteria
+        Retrieves a specific version of records matching the search criteria
+        :param search_key: int             #Value to search for
+        :param search_key_index: int       #Column to search in
+        :param projected_columns_index: list #Columns to return (1s and 0s)
+        :param relative_version: int        #Version to retrieve (negative for older versions)
+        :return: list                      #List of matching Record objects
         """
         try:
+            # Get base records
             base_records = self.get_base_records(search_key, search_key_index, projected_columns_index)
             versioned_records = []
 
+            # Process each base record
             for base_record in base_records:
+                # Handle records with no updates
                 if base_record.indirection == 0:
                     versioned_records.append(base_record)
                     continue
 
+                # Initialize version traversal
                 current_version = 0
                 current_tail_rid = base_record.indirection
                 should_return_base = False
 
+                # Get initial tail record
                 page_range_index, tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
                 current_tail_record = self.table.page_ranges[page_range_index].read_tail_record(
                     tail_page_index, 
@@ -118,12 +128,14 @@ class Query:
                     projected_columns_index
                 )
 
+                # Traverse the version chain
                 while current_version > relative_version:
-                    if current_tail_record[INDIRECTION_COLUMN] == base_record.rid:
+                    if current_tail_record[config.INDIRECTION_COLUMN] == base_record.rid:
                         should_return_base = True
                         break
 
-                    current_tail_rid = current_tail_record[INDIRECTION_COLUMN]
+                    # Move to next version
+                    current_tail_rid = current_tail_record[config.INDIRECTION_COLUMN]
                     page_range_index, tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
                     current_tail_record = self.table.page_ranges[page_range_index].read_tail_record(
                         tail_page_index, 
@@ -132,15 +144,17 @@ class Query:
                     )
                     current_version -= 1
 
+                # Determine which record to return
                 if should_return_base or relative_version < current_version:
                     versioned_records.append(base_record)
                 else:
-                    schema_value = current_tail_record[SCHEMA_ENCODING_COLUMN]
+                    # Update base record with tail record values
+                    schema_value = current_tail_record[config.SCHEMA_ENCODING_COLUMN]
                     updated_columns_bitmap = [int(bit) for bit in f"{schema_value:0{self.table.num_columns}b}"]
                     
                     for col_idx, is_updated in enumerate(updated_columns_bitmap):
                         if is_updated == 1:
-                            base_record.columns[col_idx] = current_tail_record[METADATA_COLUMNS + col_idx]
+                            base_record.columns[col_idx] = current_tail_record[config.METADATA_COLUMNS + col_idx]
                     versioned_records.append(base_record)
 
             return versioned_records
@@ -238,24 +252,33 @@ class Query:
 
     def update(self, primary_key, *columns):
         """
-        Update record in table
+        Updates a record in the table
+        :param primary_key: int   #Primary key of record to update
+        :param columns: *args     #New values for each column (None for unchanged)
+        :return: bool           #True if successful, False otherwise
         """
         try:
+            # Locate records to update
             rids = self.table.index.locate(self.table.key, primary_key)
             if rids is None:
                 return False
 
+            # Update each matching record
             for rid in rids:
+                # Get record location
                 page_range_index, base_page_index, base_slot = self.table.page_directory[rid]
                 page_range = self.table.page_ranges[page_range_index]
                 
+                # Read base record
                 base_record = page_range.read_base_record(
                     base_page_index, 
                     base_slot, 
                     [0] * self.table.num_columns
                 )
 
-                if base_record[INDIRECTION_COLUMN] == 0:
+                # Handle update based on record state
+                if base_record[config.INDIRECTION_COLUMN] == 0:
+                    # First update to this record
                     self.handleFirstUpdate(
                         page_range, 
                         base_record, 
@@ -265,6 +288,7 @@ class Query:
                         columns
                     )
                 else:
+                    # Record has previous updates
                     self.handleSubsequentUpdate(
                         page_range, 
                         base_record, 
@@ -280,17 +304,23 @@ class Query:
 
     def delete(self, primary_key):
         """
-        Delete record(s) from table
+        Deletes record(s) from the table
+        :param primary_key: int   #Primary key of record(s) to delete
+        :return: bool           #True if successful, False otherwise
         """
         try:
+            # Locate records to delete
             rids = self.table.index.locate(self.table.key, primary_key)
             if not rids:
                 return False
 
+            # Delete each matching record
             for rid in rids:
+                # Get record location and data
                 page_range_index, base_page_index, base_slot = self.table.page_directory[rid]
                 page_range = self.table.page_ranges[page_range_index]
                 
+                # Read base record
                 base_record = page_range.read_base_record(
                     base_page_index, 
                     base_slot, 
@@ -300,23 +330,30 @@ class Query:
                 if page_range_index is None:
                     return False
 
+                # Mark base record as deleted
                 base_rid = rid
-                page_range.update_base_record_column(base_page_index, base_slot, RID_COLUMN, 0)
+                page_range.update_base_record_column(base_page_index, base_slot, config.RID_COLUMN, 0)
 
-                current_rid = base_record[INDIRECTION_COLUMN]
+                # Delete associated tail records
+                current_rid = base_record[config.INDIRECTION_COLUMN]
                 while current_rid and current_rid != base_rid:
+                    # Get tail record location
                     page_range_index, tail_index, tail_slot = self.table.page_directory[current_rid]
                     if page_range_index is None:
                         break
 
+                    # Read and mark tail record as deleted
                     tail_record = page_range.read_tail_record(
                         tail_index, 
                         tail_slot,
                         [0] * self.table.num_columns
                     )
-                    page_range.update_tail_record_column(tail_index, tail_slot, RID_COLUMN, 0)
-                    current_rid = tail_record[INDIRECTION_COLUMN]
+                    page_range.update_tail_record_column(tail_index, tail_slot, config.RID_COLUMN, 0)
+                    
+                    # Move to next tail record
+                    current_rid = tail_record[config.INDIRECTION_COLUMN]
 
+                # Clean up index and directory entries
                 self.table.index.delete(base_record)
                 self.table.page_directory[rid] = None
 
@@ -326,20 +363,35 @@ class Query:
 
     def sum(self, start_range, end_range, aggregate_column_index):
         """
-        Sum values in column over key range
+        Computes the sum of values in a column over a key range
+        :param start_range: int           #Start of key range (inclusive)
+        :param end_range: int             #End of key range (inclusive)
+        :param aggregate_column_index: int #Column to sum
+        :return: int                     #Sum of values, or False if no records found
         """
+        # Use sum_version with default version (0)
         return self.sum_version(start_range, end_range, aggregate_column_index, 0)
 
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
         """
-        Sum values in column over key range for specific version
+        Computes the sum of values in a column over a key range for a specific version
+        :param start_range: int           #Start of key range (inclusive)
+        :param end_range: int             #End of key range (inclusive)
+        :param aggregate_column_index: int #Column to sum
+        :param relative_version: int       #Version to use for sum
+        :return: int                     #Sum of values, or False if no records found
         """
         try:
+            # Initialize sum variables
             total_sum = 0
             found_records = False
+            
+            # Create projection for target column
             projection = [1 if i == aggregate_column_index else 0 for i in range(self.table.num_columns)]
 
+            # Sum values over range
             for key in range(start_range, end_range + 1):
+                # Get records for current key
                 records = self.select_version(key, self.table.key, projection, relative_version)
                 
                 if records and records is not False:
@@ -350,7 +402,7 @@ class Query:
             return total_sum if found_records else False
         except:
             return False
-
+    
     def increment(self, key, column):
         """
         Increment value in record
@@ -367,3 +419,5 @@ class Query:
             return self.update(key, *updated_columns)
         except:
             return False
+
+
