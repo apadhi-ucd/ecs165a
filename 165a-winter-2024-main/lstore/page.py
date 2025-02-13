@@ -1,31 +1,41 @@
+import lstore.config as config
+from time import time
 
 class Page:
-
-    PAGE_SIZE = 4096 * 16  # 64KB
-    RECORD_SIZE = 8  # Each record is 8 bytes
-    RECORDS_PER_PAGE = PAGE_SIZE // RECORD_SIZE
-
     def __init__(self):
-        self.num_records = 0
-        self.data = bytearray(self.PAGE_SIZE)
+        self.num_records = 0                    # Number of records currently stored
+        self.data = bytearray(config.PAGE_SIZE) # Physical memory allocated for this page
 
     def has_capacity(self):
-        return self.num_records < self.RECORDS_PER_PAGE
+        """
+        Returns true if the page has capacity to store another record
+        """
+        return self.num_records < config.RECORDS_PER_PAGE
 
     def write(self, value):
+        """
+        Writes an integer value to the page
+        """
         if not self.has_capacity():
             return False
-
-        offset = self.num_records * self.RECORD_SIZE
-        value_bytes = value.to_bytes(self.RECORD_SIZE, byteorder='big', signed=True)
-        self.data[offset:offset + self.RECORD_SIZE] = value_bytes
+        
+        # Calculate offset for new record
+        offset = self.num_records * 8
+        
+        # Convert integer to bytes and write to page
+        value_bytes = value.to_bytes(8, byteorder='big', signed=True)
+        self.data[offset:offset+8] = value_bytes
         self.num_records += 1
         return True
 
     def read(self, index):
+        """
+        Reads an integer value from the page at the given index
+        """
         if index >= self.num_records:
             return None
-
-        offset = index * self.RECORD_SIZE
-        value_bytes = self.data[offset:offset + self.RECORD_SIZE]
+            
+        # Calculate offset and convert bytes back to integer
+        offset = index * 8
+        value_bytes = self.data[offset:offset+8]
         return int.from_bytes(value_bytes, byteorder='big', signed=True)
