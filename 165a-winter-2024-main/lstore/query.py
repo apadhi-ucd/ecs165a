@@ -5,12 +5,16 @@ Returns False on failure, True or requested data on success.
 """
 import time
 from lstore.table import Table, Record
-import lstore.config as config
 
 class Query:
     """
     Handles all database table operations
     """
+    SCHEMA_ENCODING_COLUMN = 3
+    INDIRECTION_COLUMN = 0
+    METADATA_COLUMNS = 4
+    RID_COLUMN = 1
+    
     def __init__(self, table):
         """
         Initialize with target table
@@ -21,15 +25,14 @@ class Query:
         """
         Create Record object from raw data
         """
-        schema_value = raw_data[config.SCHEMA_ENCODING_COLUMN]
+        schema_value = raw_data[SCHEMA_ENCODING_COLUMN]
         column_count = self.table.num_columns
         schema_encoding = [int(bit) for bit in f"{schema_value:0{column_count}b}"]
-        data_values = raw_data[config.METADATA_COLUMNS:]
+        data_values = raw_data[METADATA_COLUMNS:]
         
         return Record(
-            indirection=raw_data[config.INDIRECTION_COLUMN],
-            rid=raw_data[config.RID_COLUMN],
-            timestamp=raw_data[config.TIMESTAMP_COLUMN],  # Keep as epoch timestamp
+            indirection=raw_data[INDIRECTION_COLUMN],
+            rid=raw_data[RID_COLUMN],
             schema_encoding=schema_encoding,
             key=primary_key,
             columns=data_values
@@ -68,11 +71,10 @@ class Query:
             rid = self.table.new_rid()
             page_range = self.table.page_ranges[self.table.page_ranges_index]
 
-            new_record = [None] * config.METADATA_COLUMNS
-            new_record[config.INDIRECTION_COLUMN] = 0
-            new_record[config.RID_COLUMN] = rid
-            new_record[config.TIMESTAMP_COLUMN] = int(time.time())
-            new_record[config.SCHEMA_ENCODING_COLUMN] = 0
+            new_record = [None] * METADATA_COLUMNS
+            new_record[INDIRECTION_COLUMN] = 0
+            new_record[RID_COLUMN] = rid
+            new_record[SCHEMA_ENCODING_COLUMN] = 0
             new_record.extend(columns)
 
             index, slot = page_range.write_base_record(new_record)
@@ -115,11 +117,11 @@ class Query:
                 )
 
                 while current_version > relative_version:
-                    if current_tail_record[config.INDIRECTION_COLUMN] == base_record.rid:
+                    if current_tail_record[INDIRECTION_COLUMN] == base_record.rid:
                         should_return_base = True
                         break
 
-                    current_tail_rid = current_tail_record[config.INDIRECTION_COLUMN]
+                    current_tail_rid = current_tail_record[INDIRECTION_COLUMN]
                     page_range_index, tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
                     current_tail_record = self.table.page_ranges[page_range_index].read_tail_record(
                         tail_page_index, 
@@ -131,12 +133,12 @@ class Query:
                 if should_return_base or relative_version < current_version:
                     versioned_records.append(base_record)
                 else:
-                    schema_value = current_tail_record[config.SCHEMA_ENCODING_COLUMN]
+                    schema_value = current_tail_record[SCHEMA_ENCODING_COLUMN]
                     updated_columns_bitmap = [int(bit) for bit in f"{schema_value:0{self.table.num_columns}b}"]
                     
                     for col_idx, is_updated in enumerate(updated_columns_bitmap):
                         if is_updated == 1:
-                            base_record.columns[col_idx] = current_tail_record[config.METADATA_COLUMNS + col_idx]
+                            base_record.columns[col_idx] = current_tail_record[METADATA_COLUMNS + col_idx]
                     versioned_records.append(base_record)
 
             return versioned_records
@@ -160,11 +162,10 @@ class Query:
         """
         Create new tail record with metadata
         """
-        tail_record = [None] * config.METADATA_COLUMNS
-        tail_record[config.INDIRECTION_COLUMN] = indirection_rid
-        tail_record[config.RID_COLUMN] = tail_rid
-        tail_record[config.TIMESTAMP_COLUMN] = int(time.time())
-        tail_record[config.SCHEMA_ENCODING_COLUMN] = schema_num
+        tail_record = [None] * METADATA_COLUMNS
+        tail_record[INDIRECTION_COLUMN] = indirection_rid
+        tail_record[RID_COLUMN] = tail_rid
+        tail_record[SCHEMA_ENCODING_COLUMN] = schema_num
 
         if prev_record is None:
             tail_record.extend(col if col is not None else 0 for col in columns)
@@ -172,8 +173,8 @@ class Query:
             for i, col in enumerate(columns):
                 if col is not None:
                     tail_record.append(col)
-                elif prev_record[i + config.METADATA_COLUMNS]:
-                    tail_record.append(prev_record[i + config.METADATA_COLUMNS])
+                elif prev_record[i + METADATA_COLUMNS]:
+                    tail_record.append(prev_record[i + METADATA_COLUMNS])
                 else:
                     tail_record.append(0)
 
@@ -184,15 +185,15 @@ class Query:
         Write tail record and update directory
         """
         tail_index, tail_slot = page_range.write_tail_record(tail_record)
-        self.table.page_directory[tail_record[config.RID_COLUMN]] = (page_range_index, tail_index, tail_slot)
+        self.table.page_directory[tail_record[RID_COLUMN]] = (page_range_index, tail_index, tail_slot)
         return tail_index, tail_slot
 
     def updateBaseRecordMetadata(self, page_range, base_page_index, base_slot, tail_rid, schema_num):
         """
         Update base record metadata after tail record creation
         """
-        page_range.update_base_record_column(base_page_index, base_slot, config.INDIRECTION_COLUMN, tail_rid)
-        page_range.update_base_record_column(base_page_index, base_slot, config.SCHEMA_ENCODING_COLUMN, schema_num)
+        page_range.update_base_record_column(base_page_index, base_slot, INDIRECTION_COLUMN, tail_rid)
+        page_range.update_base_record_column(base_page_index, base_slot, SCHEMA_ENCODING_COLUMN, schema_num)
 
     def handleFirstUpdate(self, page_range, base_record, page_range_index, base_page_index, base_slot, columns):
         """
@@ -203,7 +204,7 @@ class Query:
         
         tail_record = self.createTailRecord(
             tail_rid,
-            base_record[config.RID_COLUMN],
+            base_record[RID_COLUMN],
             columns,
             schema_num
         )
@@ -214,8 +215,8 @@ class Query:
         """
         Handle updates to previously updated record
         """
-        existing_schema = [int(bit) for bit in f"{base_record[config.SCHEMA_ENCODING_COLUMN]:0{self.table.num_columns}b}"]
-        latest_tail_rid = base_record[config.INDIRECTION_COLUMN]
+        existing_schema = [int(bit) for bit in f"{base_record[SCHEMA_ENCODING_COLUMN]:0{self.table.num_columns}b}"]
+        latest_tail_rid = base_record[INDIRECTION_COLUMN]
         
         page_range_index, latest_tail_index, latest_tail_slot = self.table.page_directory[latest_tail_rid]
         latest_tail_record = page_range.read_tail_record(latest_tail_index, latest_tail_slot, existing_schema)
@@ -252,7 +253,7 @@ class Query:
                     [0] * self.table.num_columns
                 )
 
-                if base_record[config.INDIRECTION_COLUMN] == 0:
+                if base_record[INDIRECTION_COLUMN] == 0:
                     self.handleFirstUpdate(
                         page_range, 
                         base_record, 
@@ -298,9 +299,9 @@ class Query:
                     return False
 
                 base_rid = rid
-                page_range.update_base_record_column(base_page_index, base_slot, config.RID_COLUMN, 0)
+                page_range.update_base_record_column(base_page_index, base_slot, RID_COLUMN, 0)
 
-                current_rid = base_record[config.INDIRECTION_COLUMN]
+                current_rid = base_record[INDIRECTION_COLUMN]
                 while current_rid and current_rid != base_rid:
                     page_range_index, tail_index, tail_slot = self.table.page_directory[current_rid]
                     if page_range_index is None:
@@ -311,8 +312,8 @@ class Query:
                         tail_slot,
                         [0] * self.table.num_columns
                     )
-                    page_range.update_tail_record_column(tail_index, tail_slot, config.RID_COLUMN, 0)
-                    current_rid = tail_record[config.INDIRECTION_COLUMN]
+                    page_range.update_tail_record_column(tail_index, tail_slot, RID_COLUMN, 0)
+                    current_rid = tail_record[INDIRECTION_COLUMN]
 
                 self.table.index.delete(base_record)
                 self.table.page_directory[rid] = None
