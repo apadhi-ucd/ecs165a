@@ -7,15 +7,16 @@ import time
 from lstore.table import Table, Record
 from lstore.index import Index
 
+SCHEMA_ENCODING_COLUMN = 3
+INDIRECTION_COLUMN = 0
+METADATA_COLUMNS = 4
+RID_COLUMN = 1
+
 class Query:
     """
     Handles all database table operations
     """
-    SCHEMA_ENCODING_COLUMN = 3
-    INDIRECTION_COLUMN = 0
-    METADATA_COLUMNS = 4
-    RID_COLUMN = 1
-    
+
     def __init__(self, table):
         """
         Initialize with target table
