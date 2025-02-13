@@ -87,7 +87,7 @@ class PageRange:
     :param value: int          # New value to write
     :param is_base: bool       # True if adding to base pages, False if adding to tail pages
     """
-    def update(self, page_index, slot, column, value, is_base):
+    def update(self, page_index, slot, column, value, is_base = True):
         """
         Updates a single column's value in a record.
         :param is_base: bool       # True for base pages, False for tail pages
