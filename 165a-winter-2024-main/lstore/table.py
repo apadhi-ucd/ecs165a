@@ -1,5 +1,5 @@
 from lstore.index import Index
-from lstore.page import PageRange
+from lstore.page_range import PageRange
 from time import time
 
 class Record:
