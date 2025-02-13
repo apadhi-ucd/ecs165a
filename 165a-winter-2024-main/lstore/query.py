@@ -52,10 +52,11 @@ class Query:
 
         for record_id in matching_rids:
             page_range_idx, base_page_idx, slot_idx = self.table.page_directory[record_id]
-            raw_record_data = self.table.page_ranges[page_range_idx].read_base_record(
+            raw_record_data = self.table.page_ranges[page_range_idx].read(
                 base_page_idx, 
                 slot_idx, 
-                column_filter
+                column_filter,
+                is_base = True
             )
             record_object = self.create_record(raw_record_data, key_value)
             matching_records.append(record_object)
@@ -79,7 +80,7 @@ class Query:
             new_record[SCHEMA_ENCODING_COLUMN] = 0
             new_record.extend(columns)
 
-            index, slot = page_range.write_base_record(new_record)
+            index, slot = page_range.write(new_record, is_base = True)
             self.table.page_directory[rid] = (self.table.page_ranges_index, index, slot)
             self.table.index.add(new_record)
 
@@ -111,10 +112,11 @@ class Query:
                 while current_record.indirection != 0 and current_version > relative_version:
                     # Get tail record using indirection pointer
                     page_range_idx, tail_page_idx, slot_idx = self.table.page_directory[current_record.indirection]
-                    tail_record_data = self.table.page_ranges[page_range_idx].read_tail_record(
+                    tail_record_data = self.table.page_ranges[page_range_idx].read(
                         tail_page_idx,
                         slot_idx,
-                        projected_columns_index
+                        projected_columns_index,
+                        is_base = False
                     )
                     
                     # Create record object from tail data
