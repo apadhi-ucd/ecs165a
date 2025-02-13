@@ -105,13 +105,31 @@ class Query:
             versioned_records = []
 
             for base_record in base_records:
-                current_record = base_record
+                if base_record.indirection == 0:
+                    versioned_records.append(base_record)
+                    continue
+                    
                 current_version = 0
+                current_tail_rid = base_record.indirection
+                should_return_base = False
+
+
+                page_range_index, tail_page_index, tail_slot = self.table.page_directory[current_tail_rid]
+                current_tail_record = self.table.page_ranges[page_range_idx].read(
+                        tail_page_idx,
+                        slot_idx,
+                        projected_columns_index,
+                        is_base = False
+                    )
                 
                 # Follow indirection chain if record has updates
                 while current_record.indirection != 0 and current_version > relative_version:
+                    if current_tail_record[INDIRECTION_COLUMN] == base_record.rid:
+                        should_return_base = True
+                        break
                     # Get tail record using indirection pointer
-                    page_range_idx, tail_page_idx, slot_idx = self.table.page_directory[current_record.indirection]
+                    #current_tail_rid = current_tail_record[INDIRECTION_COLUMN]
+                    page_range_idx, tail_page_idx, slot_idx = self.table.page_directory[current_tail_record[INDIRECTION_COLUMN]]
                     tail_record_data = self.table.page_ranges[page_range_idx].read(
                         tail_page_idx,
                         slot_idx,
@@ -119,11 +137,20 @@ class Query:
                         is_base = False
                     )
                     
-                    # Create record object from tail data
-                    current_record = self.create_record(tail_record_data, search_key)
-                    current_version -= 1
 
-                versioned_records.append(current_record)
+                    current_version -= 1
+                # Determine which record to return
+                if should_return_base or relative_version < current_version:
+                    versioned_records.append(base_record)
+                else:
+                    # Update base record with tail record values
+                    schema_value = current_tail_record[SCHEMA_ENCODING_COLUMN]
+                    updated_columns_bitmap = [int(bit) for bit in f"{schema_value:0{self.table.num_columns}b}"]
+                    
+                    for col_idx, is_updated in enumerate(updated_columns_bitmap):
+                        if is_updated == 1:
+                            base_record.columns[col_idx] = current_tail_record[METADATA_COLUMNS + col_idx]
+                    versioned_records.append(base_record)
 
             return versioned_records
         except:
@@ -169,7 +196,7 @@ class Query:
         """
         Write tail record and update directory
         """
-        tail_index, tail_slot = page_range.write_tail_record(tail_record)
+        tail_index, tail_slot = page_range.write(tail_record, is_base = False)
         self.table.page_directory[tail_record[RID_COLUMN]] = (page_range_index, tail_index, tail_slot)
         return tail_index, tail_slot
     
