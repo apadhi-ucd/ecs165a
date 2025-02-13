@@ -177,8 +177,8 @@ class Query:
         """
         Update base record metadata after tail record creation
         """
-        page_range.update_base_record_column(base_page_index, base_slot, INDIRECTION_COLUMN, tail_rid)
-        page_range.update_base_record_column(base_page_index, base_slot, SCHEMA_ENCODING_COLUMN, schema_num)
+        page_range.update(base_page_index, base_slot, INDIRECTION_COLUMN, tail_rid, is_base = True)
+        page_range.update(base_page_index, base_slot, SCHEMA_ENCODING_COLUMN, schema_num, is_base = True)
 
     def handleFirstUpdate(self, page_range, base_record, page_range_index, base_page_index, base_slot, columns):
         """
@@ -204,7 +204,7 @@ class Query:
         latest_tail_rid = base_record[INDIRECTION_COLUMN]
         
         page_range_index, latest_tail_index, latest_tail_slot = self.table.page_directory[latest_tail_rid]
-        latest_tail_record = page_range.read_tail_record(latest_tail_index, latest_tail_slot, existing_schema)
+        latest_tail_record = page_range.read(latest_tail_index, latest_tail_slot, existing_schema, is_base = False)
         
         new_tail_rid = self.table.new_rid()
         schema, schema_num = self.createSchemaEncoding(columns, existing_schema)
@@ -233,10 +233,11 @@ class Query:
                 page_range = self.table.page_ranges[page_range_idx]
                 
                 # Read current base record
-                base_record = page_range.read_base_record(
+                base_record = page_range.read(
                     base_page_idx,
                     slot_idx,
-                    [1] * self.table.num_columns
+                    [1] * self.table.num_columns,
+                    is_base = True
                 )
 
                 # Create new tail record
@@ -282,10 +283,11 @@ class Query:
                 page_range = self.table.page_ranges[page_range_idx]
                 
                 # Read base record
-                base_record = page_range.read_base_record(
+                base_record = page_range.read(
                     base_page_idx,
                     slot_idx,
-                    [1] * self.table.num_columns
+                    [1] * self.table.num_columns,
+                    is_base = True
                 )
 
                 # Follow indirection chain and delete all versions
@@ -295,25 +297,27 @@ class Query:
                     curr_range_idx, tail_idx, tail_slot = self.table.page_directory[current_rid]
                     
                     # Read tail record to get next indirection
-                    tail_record = self.table.page_ranges[curr_range_idx].read_tail_record(
+                    tail_record = self.table.page_ranges[curr_range_idx].read(
                         tail_idx,
                         tail_slot,
-                        [1] * self.table.num_columns
+                        [1] * self.table.num_columns,
+                        is_base = True
                     )
                     
                     # Mark tail record as deleted
-                    self.table.page_ranges[curr_range_idx].update_tail_record_column(
+                    self.table.page_ranges[curr_range_idx].update(
                         tail_idx,
                         tail_slot,
                         RID_COLUMN,
-                        0
+                        0,
+                        is_base = False
                     )
                     
                     # Move to next version
                     current_rid = tail_record[INDIRECTION_COLUMN]
 
                 # Mark base record as deleted
-                page_range.update_base_record_column(base_page_idx, slot_idx, RID_COLUMN, 0)
+                page_range.update(base_page_idx, slot_idx, RID_COLUMN, 0, is_base = True)
                 self.table.index.delete(base_record)
                 self.table.page_directory[rid] = None
 
