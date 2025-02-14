@@ -48,6 +48,7 @@ class PageRange:
             print("Unexpected value in write_record")
             return
         
+        # Write record to page
         pages = self._get_pages(is_base)
         if not self.has_page_capacity(is_base):
             self.add_page(is_base)
@@ -55,10 +56,11 @@ class PageRange:
         page_index = len(pages[0]) - 1
         slot = pages[0][page_index].num_records
         
-
+        # Write metadata
         for i, value in enumerate(record):
             pages[i][page_index].write(value)
             
+        # Update metadata
         if is_base:
             self.num_base_records += 1
         else:
@@ -71,16 +73,18 @@ class PageRange:
     """
     def read_record(self, page_index, slot, projected_columns_index, is_base):
         pages = self._get_pages(is_base)
+        # Check if the index is valid
         if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
             print("Invalid index")
             return
             
         record = []
 
+        # Read metadata
         for i in range(config.METADATA_COLUMNS):
             record.append(pages[i][page_index].read(slot))
             
-   
+        # Read data
         for i in range(self.num_columns):
             if projected_columns_index[i]:
                 value = pages[i + config.METADATA_COLUMNS][page_index].read(slot)
@@ -95,14 +99,17 @@ class PageRange:
     """
     def update_record_column(self, page_index, slot, column, value, is_base):
         pages = self._get_pages(is_base)
+        # Check if the index is valid
         if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
             print("Invalid index")
             return
-            
+        
+        # Update metadata
         if column < 0 or column >= self.num_columns + config.METADATA_COLUMNS:
             print("Invalid column")
             return
             
+        # Update data
         page = pages[column][page_index]
         old_value = page.read(slot)
         if old_value is not None:
