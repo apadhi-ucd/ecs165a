@@ -41,7 +41,8 @@ class Database:
     :param name: string         #Table name
     """
     def drop_table(self, name):
- 
+        
+        # If table does not exist, return
         if name not in self.tables:
             print("Table does not exist")
             return
