@@ -1,41 +1,40 @@
 import lstore.config as config
-from time import time
 
 class Page:
+
     def __init__(self):
-        self.num_records = 0                    # Number of records currently stored
-        self.data = bytearray(config.PAGE_SIZE) # Physical memory allocated for this page
+        self.num_records = 0                    
+        self.data = bytearray(config.PAGE_SIZE) 
 
+    """
+    Returns true if the page has capacity to store another record
+    """
     def has_capacity(self):
-        """
-        Returns true if the page has capacity to store another record
-        """
-        return self.num_records < config.RECORDS_PER_PAGE
+        return self.num_records < config.PAGE_CAPACITY
 
+    """
+    Writes an integer value to the page
+    :param value: int - Integer value to write
+    """
     def write(self, value):
-        """
-        Writes an integer value to the page
-        """
         if not self.has_capacity():
             return False
         
-        # Calculate offset for new record
         offset = self.num_records * 8
         
-        # Convert integer to bytes and write to page
         value_bytes = value.to_bytes(8, byteorder='big', signed=True)
         self.data[offset:offset+8] = value_bytes
         self.num_records += 1
         return True
-
+    
+    """
+    Reads an integer value from the page
+    :param index: int - Index of the record to read
+    """
     def read(self, index):
-        """
-        Reads an integer value from the page at the given index
-        """
         if index >= self.num_records:
             return None
             
-        # Calculate offset and convert bytes back to integer
         offset = index * 8
         value_bytes = self.data[offset:offset+8]
         return int.from_bytes(value_bytes, byteorder='big', signed=True)

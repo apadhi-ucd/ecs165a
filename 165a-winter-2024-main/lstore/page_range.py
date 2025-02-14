@@ -1,113 +1,111 @@
 from lstore.page import Page    
+import lstore.config as config
 
 class PageRange:
-    BASE_PAGES_PER_RANGE = 16
 
     def __init__(self, num_columns):
         self.num_columns = num_columns
-        self.base_pages = [[] for _ in range(num_columns)]
-        self.tail_pages = [[] for _ in range(num_columns)]
-        self.num_base_records = 0
-        self.num_tail_records = 0
-
-        # Initialize with one page per column
-        for col in range(num_columns):
-            self.base_pages[col].append(Page())
-            self.tail_pages[col].append(Page())
+        self.base_pages = []                # List of base pages for each column
+        self.tail_pages = []                # List of tail pages for each column
+        self.num_tail_records = 0           # Number of tail records
+        self.num_base_records = 0           # Number of base records
+        
+        # Initialize pages for each column
+        for _ in range(num_columns + config.METADATA_COLUMNS):
+            self.base_pages.append([Page()])
+            self.tail_pages.append([Page()])
 
     """
-    Returns true if the page range has capacity to store another record
-
-    :param is_base: bool    # True if checking base pages, False if checking tail pages
+    Return either base or tail pages based on flag
+    :param is_base: bool - True for base pages, False for tail pages
     """
-    def has_page_capacity(self, is_base=True):
-        pages = self.base_pages if is_base else self.tail_pages
+    def _get_pages(self, is_base):
+        return self.base_pages if is_base else self.tail_pages
+
+    """
+    Returns true if the page range can store another record
+    :param is_base: bool - True for base pages, False for tail pages
+    """
+    def has_page_capacity(self, is_base):
+        pages = self._get_pages(is_base)
         return pages[0][-1].has_capacity()
 
     """
-    Adds a new page to the page range
-
-    :param is_base: bool    # True if adding to base pages, False if adding to tail pages
+    Adds a new page for each column when current ones are full
+    :param is_base: bool - True for base pages, False for tail pages
     """
-    def add_page(self, is_base=True):
-        pages = self.base_pages if is_base else self.tail_pages
+    def add_page(self, is_base):
+        pages = self._get_pages(is_base)
         for column in pages:
             column.append(Page())
 
-
     """
-    Writes a record to the page range
-
-    :param is_base: bool    # True if adding to base pages, False if adding to tail pages
+    Write a record to the page 
+    :param is_base: bool - True for base pages, False for tail pages
     """
-    def write(self, record, is_base=True):
-        if len(record) != self.num_columns:
-            raise ValueError(f"Expected {self.num_columns} columns, got {len(record)}")
-
+    def write_record(self, record, is_base):
+        if len(record) != self.num_columns + config.METADATA_COLUMNS:
+            print("Unexpected value in write_record")
+            return
+        
+        pages = self._get_pages(is_base)
         if not self.has_page_capacity(is_base):
             self.add_page(is_base)
-
-        pages = self.base_pages if is_base else self.tail_pages
+            
         page_index = len(pages[0]) - 1
-        slot = pages[0][page_index].num_records  # Slot is determined by the first column
+        slot = pages[0][page_index].num_records
+        
 
         for i, value in enumerate(record):
             pages[i][page_index].write(value)
-
+            
         if is_base:
             self.num_base_records += 1
         else:
             self.num_tail_records += 1
-
-        return page_index, slot
+        return (page_index, slot)
 
     """
-    Reads a record from the page range
-
-    :param page_index: int  # Index of the page to read from
-    :param slot: int        # Slot of the record to read
-    :param projected_columns: list of bool    # True if the column should be projected, False if not
-    :param is_base: bool    # True if adding to base pages, False if adding to tail pages
+    Read a record from the page 
+    :param is_base: bool - True for base pages, False for tail pages
     """
-    def read(self, page_index, slot, projected_columns, is_base=True):
-        pages = self.base_pages if is_base else self.tail_pages
+    def read_record(self, page_index, slot, projected_columns_index, is_base):
+        pages = self._get_pages(is_base)
         if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
-            return None
+            print("Invalid index")
+            return
+            
+        record = []
 
-        return [pages[i][page_index].read(slot) if projected_columns[i] else None for i in range(self.num_columns)]
-    
-
-
-
+        for i in range(config.METADATA_COLUMNS):
+            record.append(pages[i][page_index].read(slot))
+            
+   
+        for i in range(self.num_columns):
+            if projected_columns_index[i]:
+                value = pages[i + config.METADATA_COLUMNS][page_index].read(slot)
+                record.append(value)
+            else:
+                record.append(None)
+                
+        return record
     """
-    Updates a single column's value in a record.
-    :param page_index: int     # Index of the page containing the record
-    :param slot: int           # Slot number within the page
-    :param column: int         # Column index to update
-    :param value: int          # New value to write
-    :param is_base: bool       # True if adding to base pages, False if adding to tail pages
+    Update a record in the page
+    :param is_base: bool - True for base pages, False for tail pages
     """
-    def update(self, page_index, slot, column, value, is_base = True):
-        """
-        Updates a single column's value in a record.
-        :param is_base: bool       # True for base pages, False for tail pages
-        :param page_index: int     # Index of the page containing the record
-        :param slot: int           # Slot number within the page
-        :param column: int         # Column index to update
-        :param value: int          # New value to write
-        """
-        pages = self.base_pages if is_base else self.tail_pages
-
+    def update_record_column(self, page_index, slot, column, value, is_base):
+        pages = self._get_pages(is_base)
         if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
-            return False
-        
-        if column < 0 or column >= self.num_columns:
-            return False
-
-        # Overwrite the old value with the new one
+            print("Invalid index")
+            return
+            
+        if column < 0 or column >= self.num_columns + config.METADATA_COLUMNS:
+            print("Invalid column")
+            return
+            
         page = pages[column][page_index]
         old_value = page.read(slot)
         if old_value is not None:
-            page.data[slot * Page.RECORD_SIZE:(slot + 1) * Page.RECORD_SIZE] = value.to_bytes(Page.RECORD_SIZE, byteorder='big', signed=True)
-            return True
-        return False
+            page.data[slot * 8:(slot + 1) * 8] = value.to_bytes(8, byteorder='big', signed=True)
+
+    

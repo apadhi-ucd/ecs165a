@@ -1,18 +1,19 @@
 from lstore.table import Table
-import lstore.config as config
 
-class Database():
-
+class Database:
+    """
+    Database class that manages all tables
+    """
     def __init__(self):
-        self.tables = {} # changed from list to dictionary to allow for O(1) lookup time
+        self.tables = {}        # Dictionary mapping table names to Table objects
 
     # Not required for milestone1
     def open(self, path):
         pass
 
-    # Not required for milestone1
     def close(self):
         pass
+
 
     """
     # Creates a new table
@@ -21,33 +22,38 @@ class Database():
     :param key: int             #Index of table key in columns
     """
     def create_table(self, name, num_columns, key_index):
-        # Check if table name already exists
-        if name in self.tables:
-            raise Exception("ERROR: Table already exists, Table name must be unique") # Table name must be unique
 
-        # Create a new local table
-        tb = Table(name, num_columns, key_index)
-        self.tables[name] = tb  # pushing the new local table in the database
+        # If table exists, return existing table
+        if name in self.tables: 
+            print("Table already exists")
+            self.tables[name] = table
+            return table
+        
+        # Create table
+        table = Table(name, num_columns, key_index)
+        self.tables[name] = table
 
-        # Return the created table
-        return tb
-    
+        # Return table
+        return table
 
-
-    
     """
     # Deletes the specified table
+    :param name: string         #Table name
     """
     def drop_table(self, name):
-       # Check if table name exists
-        if name in self.tables:
-            del self.tables[name]
-            return True
-            
-        return False
+ 
+        if name not in self.tables:
+            print("Table does not exist")
+            return
+ 
+        del self.tables[name]
+
+
     
     """
     # Returns table with the passed name
+    :param name: string         #Table name
     """
     def get_table(self, name):
+
         return self.tables[name]
