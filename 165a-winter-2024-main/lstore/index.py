@@ -14,6 +14,7 @@ class Index:
     """
     def locate(self, column, value):
 
+        # check if column is valid
         bTree = self.indices[column]
         return bTree[value] if value in bTree else None
 
@@ -23,9 +24,11 @@ class Index:
     """
     def locate_range(self, begin, end, column):
 
-
+        # check if column is valid
         bTree = self.indices[column] # 
         rids = set()
+
+        # iterate over keys in range
         for key in bTree.keys(begin, end):
             rids.update(bTree[key])
         return rids if rids else None
@@ -47,10 +50,15 @@ class Index:
     :param record: Record to insert
     """
     def insert(self, record):
+        # get rid
         rid = record[config.RID_COLUMN]
+
+        # iterate over columns
         for i, column in enumerate(self.indices): 
             if column is not None: 
+                # get key
                 key = record[i + config.METADATA_COLUMNS]
+                # insert
                 if key not in column:
                     column[key] = set()
                 column[key].add(rid)
@@ -61,9 +69,12 @@ class Index:
     """
     def delete(self, record):
         rid = record[config.RID_COLUMN]
+
+        # iterate over columns
         for i, column in enumerate(self.indices):
             if column is not None:
                 key = record[i + config.METADATA_COLUMNS]
+                # delete
                 if key in column:
                     column[key].remove(rid)
                     if not column[key]:
