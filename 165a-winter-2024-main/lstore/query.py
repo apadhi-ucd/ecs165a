@@ -14,20 +14,22 @@ class Query:
     """
     def delete(self, primary_key):
         try:
-            rids = self.table.index.locate(self.table.key, primary_key)
+            rids = self.table.index.locate(self.table.key, primary_key) # Get all records with the given primary key
             if not rids:
                 return False
+            
+            # Delete all records with the given primary key
             for rid in rids:
                 page_range_index, base_index, slot_index = self.table.page_directory[rid]
                 page_range = self.table.page_range[page_range_index]
                 base_rec = page_range.read_record(base_index, slot_index, [1] * self.table.num_columns, True)
-                if page_range_index is None:
+                if page_range_index is None: # If the page range is None, then the record is already deleted
                     return False
                 page_range.update_record_column(base_index, slot_index, config.RID_COLUMN, 0, True)
                 current_rid = base_rec[config.INDIRECTION_COLUMN]
-                while current_rid and current_rid != rid:
+                while current_rid and current_rid != rid: # Delete all tail records
                     page_range_index, tail_index, tail_slot = self.table.page_directory[current_rid]
-                    if page_range_index is None:
+                    if page_range_index is None: # If the page range is None, then the record is already deleted
                         break
                     tail_rec = page_range.read_record(tail_index, tail_slot, [0] * self.table.num_columns, False)
                     page_range.update_record_column(tail_index, tail_slot, config.RID_COLUMN, 0, False)
@@ -44,9 +46,10 @@ class Query:
     """
     def insert(self, *values):
         try:
-            if len(values) != self.table.num_columns:
+            if len(values) != self.table.num_columns: # If the number of values is not equal to the number of columns, then the record is invalid
                 return False
             
+            # Create a new record
             new_rid = self.table.new_rid()
             active_page_range = self.table.page_range[self.table.page_range_index]
             new_entry = [None] * config.METADATA_COLUMNS
@@ -56,6 +59,7 @@ class Query:
             new_entry[config.SCHEMA_ENCODING_COLUMN] = 0
             new_entry.extend(values)
             
+            # Write new record to page
             page_index, slot_index = active_page_range.write_record(new_entry, True)
             self.table.page_directory[new_rid] = (self.table.page_range_index, page_index, slot_index)
             self.table.index.insert(new_entry)
@@ -83,20 +87,24 @@ class Query:
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         try:
+            # Get all base records with the given key
             base_records = self.get_records(search_key, search_key_index, projected_columns_index)
             retrieved_records = []
             
+            # Get all tail records with the given key
             for base_rec in base_records:
                 if base_rec.indirection == 0:
                     retrieved_records.append(base_rec)
                     continue
                 
+                # Get all tail records for the base record
                 current_version = 0
                 tail_rid = base_rec.indirection
                 return_base = False
                 pr_index, tp_index, slot = self.table.page_directory[tail_rid]
                 tail_record = self.table.page_range[pr_index].read_record(tp_index, slot, projected_columns_index, False)
                 
+                # Get the version of the tail record
                 while current_version > relative_version:
                     if tail_record[config.INDIRECTION_COLUMN] == base_rec.rid:
                         return_base = True
@@ -106,12 +114,13 @@ class Query:
                     tail_record = self.table.page_range[pr_index].read_record(tp_index, slot, projected_columns_index, False)
                     current_version -= 1
                 
+                # If the version is greater than the relative version, then return the base record
                 if return_base or relative_version < current_version:
                     retrieved_records.append(base_rec)
-                else:
+                else: # Otherwise, return the tail record
                     schema_value = tail_record[config.SCHEMA_ENCODING_COLUMN]
                     updated_columns = [int(bit) for bit in f"{schema_value:0{self.table.num_columns}b}"]
-                    for index, updated in enumerate(updated_columns):
+                    for index, updated in enumerate(updated_columns):  # Update the base record with the tail record
                         if updated:
                             base_rec.columns[index] = tail_record[config.METADATA_COLUMNS + index]
                     retrieved_records.append(base_rec)
@@ -127,7 +136,7 @@ class Query:
     """    
     def update(self, primary_key, *columns):
         try:
-            rids = self.table.index.locate(self.table.key, primary_key)
+            rids = self.table.index.locate(self.table.key, primary_key) # Get all records with the given key
             if not rids:
                 return False
             
@@ -180,11 +189,12 @@ class Query:
     """
     def sum_version(self, start_range, end_range, agg_col_index, relative_version):
         try:
+            # Get all records with the given key
             total_sum, found_records = 0, False
             projection = [1 if i == agg_col_index else 0 for i in range(self.table.num_columns)]
-            for key in range(start_range, end_range + 1):
+            for key in range(start_range, end_range + 1): # Get all records with the given key
                 records = self.select_version(key, self.table.key, projection, relative_version)
-                if records:
+                if records: # If the record is not found, then return False
                     found_records = True
                     total_sum += records[0].columns[agg_col_index] or 0
             return total_sum if found_records else False
@@ -198,13 +208,16 @@ class Query:
     """
     def increment(self, key, column):
         try:
+            # Get all records with the given key
             records = self.select(key, self.table.key, [1] * self.table.num_columns)
+
+            # If the record is not found, then return False
             if not records:
                 return False
             record = records[0]
             updated_columns = [None] * self.table.num_columns
             updated_columns[column] = record[column] + 1
-            return self.update(key, *updated_columns)
+            return self.update(key, *updated_columns) # Update the record
         except:
             return False
 
@@ -214,12 +227,13 @@ class Query:
     :param primary_key: int - Primary key value for the new record
     """
     def create_record(self, values, primary_key):
-        timestamp = datetime.fromtimestamp(float(values[config.TIMESTAMP_COLUMN]))
-        schema_encoding_value = values[config.SCHEMA_ENCODING_COLUMN]
-        num_columns = self.table.num_columns
-        schema_bits = [int(bit) for bit in f"{schema_encoding_value:0{num_columns}b}"]
-        column_data = values[config.METADATA_COLUMNS:]
+        timestamp = datetime.fromtimestamp(float(values[config.TIMESTAMP_COLUMN])) # Convert timestamp to datetime object
+        schema_encoding_value = values[config.SCHEMA_ENCODING_COLUMN] # Get schema encoding value
+        num_columns = self.table.num_columns # Get number of columns
+        schema_bits = [int(bit) for bit in f"{schema_encoding_value:0{num_columns}b}"] # Get schema bits
+        column_data = values[config.METADATA_COLUMNS:] # Get column data
         
+        # Create a new record
         return Record(indirection=values[config.INDIRECTION_COLUMN], rid=values[config.RID_COLUMN], timestamp=timestamp, schema_encoding=schema_bits, key=primary_key, columns=column_data)
 
     """
@@ -230,10 +244,12 @@ class Query:
     """
     def get_records(self, key, key_index, column_mask):
         results = []
+        # Get all records with the given key
         matching_rids = self.table.index.locate(key_index, key)
         if not matching_rids:
             return []
         
+        # Get all base records with the given key
         for rid in matching_rids:
             pr_index, bp_index, slot = self.table.page_directory[rid]
             raw_record = self.table.page_range[pr_index].read_record(bp_index, slot, column_mask, True)
@@ -247,14 +263,16 @@ class Query:
     :param existing_schema: list - List of existing schema bits, if any
     """
     def createSchemaEncoding(self, columns, existing_schema=None):
+        # Create a schema encoding for the new record
         if existing_schema is None:
             schema_bits = [1 if col is not None else 0 for col in columns]
-        else:
+        else: # If the record has been updated before, create a new schema encoding based on the existing schema
             schema_bits = existing_schema[:]
             for index, col in enumerate(columns):
                 if col is not None:
                     schema_bits[index] = 1
         
+        # Convert the schema encoding to an integer
         return schema_bits, int("".join(map(str, schema_bits)), 2)
 
     """
@@ -266,16 +284,17 @@ class Query:
     :param prev_record: list - List of values from the previous tail record
     """
     def createTailRecord(self, tail_rid, indirection_rid, column_values, schema_encoding, prev_record=None):
-        tail_entry = [None] * config.METADATA_COLUMNS
-        tail_entry[config.INDIRECTION_COLUMN] = indirection_rid
-        tail_entry[config.RID_COLUMN] = tail_rid
-        tail_entry[config.TIMESTAMP_COLUMN] = int(time.time())
-        tail_entry[config.SCHEMA_ENCODING_COLUMN] = schema_encoding
+        tail_entry = [None] * config.METADATA_COLUMNS # Create a new tail record
+        tail_entry[config.INDIRECTION_COLUMN] = indirection_rid # Set the indirection column
+        tail_entry[config.RID_COLUMN] = tail_rid # Set the RID column
+        tail_entry[config.TIMESTAMP_COLUMN] = int(time.time()) # Set the timestamp column
+        tail_entry[config.SCHEMA_ENCODING_COLUMN] = schema_encoding # Set the schema encoding column
         
+        # If the record has been updated before, set the column values to the previous tail record
         if prev_record is None:
             tail_entry.extend(col if col is not None else 0 for col in column_values)
         else:
-            for i, col in enumerate(column_values):
+            for i, col in enumerate(column_values): # Set the column values to the previous tail record
                 if col is not None:
                     tail_entry.append(col)
                 elif prev_record[i + config.METADATA_COLUMNS]:
@@ -292,6 +311,7 @@ class Query:
     :param tail_rec: list - List of values for the new tail
     """
     def writeTailRecord(self, page_range, page_range_index, tail_rec):
+        # Write the new tail record to the page range
         tail_index, tail_slot = page_range.write_record(tail_rec, False)
         self.table.page_directory[tail_rec[config.RID_COLUMN]] = (page_range_index, tail_index, tail_slot)
         return tail_index, tail_slot
