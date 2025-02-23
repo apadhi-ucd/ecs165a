@@ -40,3 +40,12 @@ Implementations:
 TO DO:
 - Figure out merge()
 - Ensure compatibility with "labeling" idea
+
+
+
+CYRUS (2/23 : 2pm):
+- added BufferPool class
+- included pseudo ish code for logical flow of the new class
+- Thoughts moving forward:
+    - update query table calls -> query buffer pool calls as all data should be in buffer pool
+    - rethinking if page count is necessary within the buffer pool class, is it a set number of pages open at all times? or is it variable depending on need? If variable, we need to have the page count, if it is a set number of pages, then we don't
