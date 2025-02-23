@@ -23,3 +23,20 @@ Milestone 2 Functions and Goals
                      Dirty pages - Keep track of updated pages in the bufferpool used when 
                      flush to disk upon replacement or when close() is called and can have something like if all page in 
                      bufferpool dirty val = 0... 
+
+Implementations:
+
+      Update Page Class - within the init(), implement a first line label for each page holding important information about the page (i.e. number of page visits, dirty/clean, table association.)
+
+
+      Buffer Pool Class: 
+        - Notes: Least frequently used out first
+        - Instance variabels: dirty page count, number of pages
+        - evict(): checks if page is clean or dirty, writes to disk if clean, otherwise discards
+        - pull(): pull full page from disk based off of needed data
+        - read(): should return wanted data and update the dirty/clean and page visits variables in the page
+
+
+TO DO:
+- Figure out merge()
+- Ensure compatibility with "labeling" idea
