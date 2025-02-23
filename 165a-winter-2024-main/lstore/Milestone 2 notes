@@ -1,0 +1,25 @@
+Milestone 2 Functions and Goals
+
+  Goals:
+      Bufferpool - From what I understand the bufferpool it keeps track of most frequent accessed pages, evicts a page 
+                   when needed, utilizes pin/unpin and ensures multiple transactions occur concurrently/same time
+
+                   My ideas for each purpose:
+
+                     What to track - Whenever a page is accessed, we can have a variable keeping track of visits and increment each time 
+                     and we could compare each page and include the most visited pages in the bufferpool. Starting out we
+                     can have bufferpool empty and add the first visited pages into the pool.
+
+                     Eviction - Evicting pages I think the easiest method would to be evict a page with the least visits, and if 
+                     there is a tie among number of visits, we can do random or pick the page that hasn't been visited 
+                     for the longest time or whatever is easier.
+
+                     Pin/Unpin - When a page is accessed, can set a pin value = 1 and when transaction is finished, set 
+                     pin value back to 0. So, we could have something like if page pin = 1 --> dont evict (Essentially
+                     this keeps track of which pages are being used)
+
+                     Synchronization - Not sure if we need this in this milestone 
+
+                     Dirty pages - Keep track of updated pages in the bufferpool used when 
+                     flush to disk upon replacement or when close() is called and can have something like if all page in 
+                     bufferpool dirty val = 0... 
