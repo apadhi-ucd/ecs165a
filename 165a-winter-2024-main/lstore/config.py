@@ -10,6 +10,7 @@ PAGE_CAPACITY = PAGE_SIZE // RECORD_SIZE  # Number of records per page
 BASE_PAGES_PER_RANGE = 16          # 16 base pages per range
 BUFFER_POOL_SIZE = 20           # UNSURE WHAT TRUE SIZE SHOULD BE
 DIRTY_PAGE_THRESHOLD = 15       # Threshold of dirty pages before automatic merge
+MERGE_THRESHOLD = 1000            # Number of updates before merge
 
 
 
