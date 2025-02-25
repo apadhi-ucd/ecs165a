@@ -1,5 +1,6 @@
 from lstore.index import Index
 from lstore.page_range import PageRange
+import msgpack
 
 class Record:
 
@@ -58,3 +59,13 @@ class Table:
     def __merge(self):
         print("merge is happening")
         pass
+
+    @staticmethod
+    def delete_data(db_path, name):
+        """Deletes the table's data file by writing an empty file."""
+        data_file = db_path + f"_{name}.msgpack"
+        try:
+            with open(data_file, "wb") as file:
+                file.write(msgpack.packb([], use_bin_type=True))  # Overwrite with empty list
+        except FileNotFoundError:
+            pass  # If file doesn't exist, do nothing

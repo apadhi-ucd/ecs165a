@@ -49,3 +49,11 @@ CYRUS (2/23 : 2pm):
 - Thoughts moving forward:
     - update query table calls -> query buffer pool calls as all data should be in buffer pool
     - rethinking if page count is necessary within the buffer pool class, is it a set number of pages open at all times? or is it variable depending on need? If variable, we need to have the page count, if it is a set number of pages, then we don't
+
+OTHER CYRUS (2/24 : 10pm):
+- implemented database persistence using msgpack 
+- updated query so that existing primary key insertion and update tests in extended milestone 1 tester now pass, test 9 "Existing primary key results update test case" still fails though, looking into that right now.
+    - also the tester shows the times as 0 now instead of showing an actual time so idk if thats bad tbh i'll investigate that later if needed though
+- Next steps:
+    - implement bufferpool class and add the implementation into query/table
+    - implement table merge class

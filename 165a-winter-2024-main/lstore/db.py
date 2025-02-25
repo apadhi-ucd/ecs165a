@@ -1,18 +1,31 @@
 from lstore.table import Table
+import msgpack
+from BTrees.OOBTree import OOBTree
 
 class Database:
     """
     Database class that manages all tables
     """
     def __init__(self):
-        self.tables = {}        # Dictionary mapping table names to Table objects
+        self.tables = OOBTree()  # Dictionary mapping table names to Table objects
+        self.path = None  # File prefix for persistence
 
     # Not required for milestone1
     def open(self, path):
-        pass
+        """Loads database metadata from a file if it exists, otherwise initializes a new one."""
+        self.path = path
+
+        try:
+            with open(path + "_index.msgpack", "rb") as file:
+                self.tables = msgpack.unpackb(file.read(), raw=False)
+        except FileNotFoundError:
+            self.tables = OOBTree()  # Start fresh if no file exists
 
     def close(self):
-        pass
+        """Saves the database index (metadata) to disk using msgpack."""
+        if self.path:
+            with open(self.path + "_index.msgpack", "wb") as file:
+                file.write(msgpack.packb(self.tables, use_bin_type=True))
 
 
     """
@@ -32,6 +45,7 @@ class Database:
         # Create table
         table = Table(name, num_columns, key_index)
         self.tables[name] = table
+        self.close()  # Save metadata changes
 
         # Return table
         return table
@@ -46,8 +60,9 @@ class Database:
         if name not in self.tables:
             print("Table does not exist")
             return
- 
+        Table.delete_data(self.path, name)  # Delete stored table data
         del self.tables[name]
+        self.close()  # Save metadata changes
 
 
     
