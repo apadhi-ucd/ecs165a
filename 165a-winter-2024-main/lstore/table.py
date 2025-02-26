@@ -19,9 +19,6 @@ class Record:
 
     def __str__(self):
         return f"RID: {self.rid} Key: {self.key} \nColumns: {self.columns}"
-    
-    def __getitem__(self, column):
-        return self.columns[column]
 
 class Table:
 
@@ -44,13 +41,14 @@ class Table:
 
         self.page_directory = {}
         '''
-        Page directory will map rids to consolidated rids
+        Page direcotry will map rids to consolidated rids
         page_directory[rid] = consolidated_rid
         consolidated_rid is treated the same as a base_rid
         Table_merge should be the only function that modifies the page_directory
-        All others can access the page_directory
+        All others can access the page_dierctory
         '''
         self.page_directory_lock = threading.Lock()
+
 
         # initialize bufferpool in table, not DB
         self.bufferpool = BufferPool(self.table_path, self.num_columns)
@@ -65,14 +63,8 @@ class Table:
 
         # The table should handle assigning RIDs
         self.rid_index = 0
-        self.rid = 1  # For backward compatibility
         
         self.index = Index(self)
-        
-        # For backward compatibility
-        self.first_select_called = False
-        self.page_range_index = 0
-        
         # Start the merge thread
         # Note: This thread will stop running when the main program terminates
         self.merge_thread = threading.Thread(target=self.__merge, daemon=True)
@@ -110,19 +102,11 @@ class Table:
 
         with current_page_range.page_range_lock:
             record.columns[TIMESTAMP_COLUMN] = current_page_range.tps
-        current_page_range.write_base_record(page_index, page_slot, record.columns)
-        
-        # Update page_directory for backward compatibility
-        self.page_directory[record.rid] = (page_range_index, page_index, page_slot)
+        current_page_range.write_base_record(page_index, page_slot, record.columns)   
 
     def update_record(self, rid, columns) -> bool:
         '''Updates a record given its RID'''
         page_range_index = rid // MAX_RECORD_PER_PAGE_RANGE
-        
-        # Ensure page_range exists
-        if page_range_index >= len(self.page_ranges):
-            return False
-            
         current_page_range:PageRange = self.page_ranges[page_range_index]
 
         with current_page_range.page_range_lock:
@@ -132,34 +116,23 @@ class Table:
 
         if (current_page_range.tps % (MAX_TAIL_PAGES_BEFORE_MERGING * MAX_RECORD_PER_PAGE) == 0):
             self.merge_queue.put(MergeRequest(current_page_range.page_range_index)) 
+            # if (self.merge_thread.is_alive() == False):
+            #     self.merge_thread = threading.Thread(target=self.__merge)
+            #     self.merge_thread.start()
 
         return update_success
-    
-    def new_rid(self):
-        """For backward compatibility"""
-        self.rid += 1
-        return self.rid - 1
-    
-    def create_page_range(self):
-        """For backward compatibility"""
-        if len(self.page_ranges) == 0 or not self.page_ranges[-1].has_page_capacity(True):
-            self.page_ranges.append(PageRange(len(self.page_ranges), self.num_columns, self.bufferpool))
-            self.page_range_index += 1
-    
-    def reset(self):
-        """For backward compatibility"""
-        self.page_ranges = []
-        self.page_range_index = 0
-        self.page_directory = {}
-        self.index = Index(self)
+
     
     def __merge(self):
+        # print("Merge is happening")
+
         while True:
             # Block ensures that we wait for a record to be added to the queue first
             # before we continue merging a record
             merge_request:MergeRequest = self.merge_queue.get()
 
-            # make a copy of the base page for the received rid
+
+            # make a copy of the base page for the recieved rid
             start_rid = merge_request.page_range_index * MAX_RECORD_PER_PAGE_RANGE
             end_rid = min(start_rid + MAX_RECORD_PER_PAGE_RANGE, self.rid_index)
 
@@ -206,6 +179,7 @@ class Table:
             
             self.merge_queue.task_done()
 
+
     def __insert_base_copy_to_tail_pages(self, page_range:PageRange, base_record_columns):
         '''Inserts a copy of the base record to the last tail page of the record'''
         logical_rid = page_range.assign_logical_rid()
@@ -236,19 +210,17 @@ class Table:
             "key_index": self.key,
             "page_directory": self.serialize_page_directory(),
             "rid_index": self.rid_index,
-            "rid": self.rid,  # For backward compatibility
             "index": self.index.serialize(),
             "page_ranges": [pr.serialize() for pr in self.page_ranges]
         }
+        
         
     def serialize_page_directory(self):
         """Serializes the Page Directory for JSON compatibility"""
         serialized_directory = {}
         for rid, location in self.page_directory.items():
             # Location is (Page Range ID, Page Index, Slot Index)
-            if location is None:
-                continue
-            serialized_directory[str(rid)] = {
+            serialized_directory[rid] = {
                 "page_range_id": location[0],
                 "page_index": location[1],
                 "slot_index": location[2]
@@ -258,27 +230,23 @@ class Table:
     def deserialize(self, data):
         """Restores the Table state from a JSON-compatible dictionary"""
         # Restore basic table metadata
-        self.name = data.get('table_name', self.name)
-        self.num_columns = data.get('num_columns', self.num_columns)
-        self.key = data.get('key_index', self.key)
-        self.rid_index = data.get('rid_index', 0)
-        self.rid = data.get('rid', 1)  # For backward compatibility
+        self.name = data['table_name']
+        self.num_columns = data['num_columns']
+        self.key = data['key_index']
+        self.rid_index = data['rid_index']
         
         # Recreate Page Directory
-        if 'page_directory' in data:
-            self.page_directory = self.deserialize_page_directory(data['page_directory'])
+        self.page_directory = self.deserialize_page_directory(data['page_directory'])
 
         # Recreate Index
-        if 'index' in data and hasattr(self.index, 'deserialize'):
-            self.index.deserialize(data['index'])
+        self.index.deserialize(data['index'])
 
-        # Recreate Page Ranges
-        if 'page_ranges' in data:
-            for idx, pr_data in enumerate(data['page_ranges']):
-                # Create PageRange with required arguments
-                page_range = PageRange(idx, self.num_columns, self.bufferpool)
-                page_range.deserialize(pr_data)
-                self.page_ranges.append(page_range)
+        for idx, pr_data in enumerate(data['page_ranges']):
+        # Fix: Pass required arguments for PageRange
+            page_range = PageRange(idx, self.num_columns, self.bufferpool)
+            page_range.deserialize(pr_data)
+            self.page_ranges.append(page_range)
+            
 
     def deserialize_page_directory(self, serialized_directory):
         """Deserializes the Page Directory from JSON-compatible format"""
@@ -309,12 +277,6 @@ class Table:
 
                 # locate page range given rid
                 page_range_idx, page_idx, page_slot = self.get_base_record_location(rid)
-                
-                # Skip if page_range doesn't exist
-                if page_range_idx >= len(self.page_ranges):
-                    self.deallocation_base_rid_queue.task_done()
-                    continue
-                    
                 page_range = self.page_ranges[page_range_idx]
 
                 self.allocation_base_rid_queue.put(rid)
@@ -328,17 +290,3 @@ class Table:
                     logical_rid = page_range.bufferpool.read_page_slot(page_range_idx, INDIRECTION_COLUMN, logical_page_index, logical_page_slot)
             
                 self.deallocation_base_rid_queue.task_done()
-                
-    # For backward compatibility with existing code
-    def load_records(self, db_path):
-        """Stub for backward compatibility"""
-        pass
-        
-    def persist_records(self, db_path):
-        """Stub for backward compatibility"""
-        pass
-        
-    @staticmethod
-    def delete_data(db_path, name):
-        """Stub for backward compatibility"""
-        pass

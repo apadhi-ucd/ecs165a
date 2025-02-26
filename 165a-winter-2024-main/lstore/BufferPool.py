@@ -7,6 +7,7 @@ DB Directory: Folder
             -> Page_{record_column}_{page_index}.bin: File
 '''
 
+
 from lstore.config import MAX_NUM_FRAME, NUM_HIDDEN_COLUMNS
 from lstore.page import Page
 import os
@@ -244,6 +245,24 @@ class BufferPool:
 
         return current_frame
     
+    # Refactoring in progress
+    # def __frame_load_policy(self, page_disk_path) -> Frame:
+    #     '''Returns a frame with the disk path, returns false if failed'''
+    #     page_frame_num = self.frame_directory.get(page_disk_path, None)
+    #     current_frame:Frame = None
+
+    #     if (page_frame_num is None):
+    #         if (self.available_frames_queue.empty() and not self.__replacement_policy()):
+    #             # If no frames are available and we were unable to diallocate frames due to lock then returns None
+    #             return False
+
+    #         current_frame:Frame = self.__load_new_frame(page_disk_path)
+    #     else:
+    #         current_frame:Frame = self.frames[page_frame_num]
+    #         current_frame.increment_pin()
+
+    #     return current_frame
+        
     def __replacement_policy(self) -> bool:
         '''
         Using LRU Policy
@@ -267,4 +286,3 @@ class BufferPool:
                 self.unavailable_frames_queue.put(frame_num)
 
         return False
-
