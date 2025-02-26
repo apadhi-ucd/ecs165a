@@ -17,100 +17,92 @@ from queue import Queue
 from typing import List, Union
 
 
-class Frame:
-    '''Each frame inside the bufferpool'''
-    def __init__(self):
-        self.pin:int = 0
-        self.page:Page = None
-        self.page_path = None
-        self.dirty:bool = False
-        '''If the Dirty bit is true we need to write to disk before discarding the frame'''
-
-        self._pin_lock = threading.Lock()
-        self._write_lock = threading.Lock()
-
-    def load_page(self, page_path:str):
-        '''Loads a page from disk to memory
-        If the page is not found then it creates a new page'''
-
-        self._write_lock.acquire()
-
-        self.page = Page()
-        self.page_path = page_path
-        if os.path.exists(page_path):
-            with open(page_path, "r", encoding="utf-8") as page_file:
-                page_json_data = json.load(page_file)
-            self.page.deserialize(page_json_data)
-        else:
-            os.makedirs(os.path.dirname(page_path), exist_ok=True)
-            self.dirty = True
-
-        self._write_lock.release()
-
-    def unload_page(self):
-        if (self.pin > 0):
-            raise MemoryError("Cannot unload a page thats being used by processes")
-        
-        self._write_lock.acquire()
-
-        if (self.dirty):
-            with open(self.page_path, "w", encoding="utf-8") as page_json_file:
-                page_data = self.page.serialize()
-                json.dump(page_data, page_json_file)
-
-        self.dirty = False
-        self.page = None
-        self.page_path = None
-
-        self._write_lock.release()
-
-    def write_precise_with_lock(self, slot_index, value):
-        '''Writes a value to a page slot with a lock'''
-        with self._write_lock:
-            self.dirty = True
-            self.page.write_precise(slot_index, value)
-
-    def write_with_lock(self, value) -> int:
-        '''Writes a value to a page with a lock'''
-        with self._write_lock:
-            self.dirty = True
-            return self.page.write(value)
-
-    
-    def get_page_capacity(self) -> bool:
-        '''Returns True if the page has capacity for more records'''
-        with self._write_lock:
-            return self.page.has_capacity()
-
-    def increment_pin(self):
-        '''Increments the pin count'''
-        with self._pin_lock:
-            self.pin += 1
-
-    def decrement_pin(self):
-        '''Decrements the pin count'''
-        with self._pin_lock:
-            self.pin -= 1
-
 class BufferPool:
     '''Every access to pages should go through the bufferpool'''
     def __init__(self, table_path, num_columns):
-        self.frame_directory = dict()
+        self.frame_directory = dict()  # Maps page paths to frame numbers
         self.num_frames = MAX_NUM_FRAME * (num_columns + NUM_HIDDEN_COLUMNS)
-        '''Frame directory keeps track of page# to frame#'''
-        self.frames:List[Frame] = []
+        
+        # Frame attributes (previously stored in Frame class)
+        self.frame_pins = [0] * self.num_frames  # Pin counts for each frame
+        self.frame_pages = [None] * self.num_frames  # Page objects for each frame
+        self.frame_page_paths = [None] * self.num_frames  # Page paths for each frame
+        self.frame_dirty_bits = [False] * self.num_frames  # Dirty flags for each frame
+        
+        # Locks for each frame
+        self.frame_pin_locks = [threading.Lock() for _ in range(self.num_frames)]
+        self.frame_write_locks = [threading.Lock() for _ in range(self.num_frames)]
+        
         self.available_frames_queue = Queue(self.num_frames)
         self.unavailable_frames_queue = Queue(self.num_frames)
         
         self.table_path = table_path
         self.bufferpool_lock = threading.Lock()
 
+        # Initialize available frames
         for i in range(self.num_frames):
-            self.frames.append(Frame())
             self.available_frames_queue.put(i)
+    
+    # Frame management methods (previously in Frame class)
+    def _load_page_to_frame(self, frame_num, page_path):
+        '''Loads a page from disk to the specified frame'''
+        
+        with self.frame_write_locks[frame_num]:
+            self.frame_pages[frame_num] = Page()
+            self.frame_page_paths[frame_num] = page_path
+            
+            if os.path.exists(page_path):
+                with open(page_path, "r", encoding="utf-8") as page_file:
+                    page_json_data = json.load(page_file)
+                self.frame_pages[frame_num].deserialize(page_json_data)
+            else:
+                os.makedirs(os.path.dirname(page_path), exist_ok=True)
+                self.frame_dirty_bits[frame_num] = True
+    
+    def _unload_page_from_frame(self, frame_num):
+        '''Unloads a page from the specified frame'''
+        if self.frame_pins[frame_num] > 0:
+            raise MemoryError("Cannot unload a page that's being used by processes")
+        
+        with self.frame_write_locks[frame_num]:
+            if self.frame_dirty_bits[frame_num]:
+                with open(self.frame_page_paths[frame_num], "w", encoding="utf-8") as page_json_file:
+                    page_data = self.frame_pages[frame_num].serialize()
+                    json.dump(page_data, page_json_file)
+            
+            self.frame_dirty_bits[frame_num] = False
+            self.frame_pages[frame_num] = None
+            self.frame_page_paths[frame_num] = None
+    
+    def _write_precise_with_lock(self, frame_num, slot_index, value):
+        '''Writes a value to a page slot with a lock'''
+        with self.frame_write_locks[frame_num]:
+            self.frame_dirty_bits[frame_num] = True
+            self.frame_pages[frame_num].write_precise(slot_index, value)
+    
+    def _write_with_lock(self, frame_num, value) -> int:
+        '''Writes a value to a page with a lock'''
+        with self.frame_write_locks[frame_num]:
+            self.frame_dirty_bits[frame_num] = True
+            return self.frame_pages[frame_num].write(value)
+    
+    def _get_page_capacity(self, frame_num) -> bool:
+        '''Returns True if the page has capacity for more records'''
+        with self.frame_write_locks[frame_num]:
+            return self.frame_pages[frame_num].has_capacity()
+    
+    def _increment_pin(self, frame_num):
+        '''Increments the pin count of a frame'''
+        with self.frame_pin_locks[frame_num]:
+            self.frame_pins[frame_num] += 1
+    
+    def _decrement_pin(self, frame_num):
+        '''Decrements the pin count of a frame'''
+        with self.frame_pin_locks[frame_num]:
+            self.frame_pins[frame_num] -= 1
 
-    def get_page_frame(self, page_range_index, record_column, page_index) -> Union[Frame, None]:
-        '''Returns a Frame of a page if the page can be grabbed from disk, 
+    def get_page_frame(self, page_range_index, record_column, page_index) -> Union[int, None]:
+        '''Returns the frame number of a page if the page can be grabbed from disk, 
         otherwise returns None'''
 
         page_disk_path = self.get_page_path(page_range_index, record_column, page_index)
@@ -121,12 +113,11 @@ class BufferPool:
             if (self.available_frames_queue.empty() and not self.__replacement_policy()):
                 return None
             
-            current_frame:Frame = self.__load_new_frame(page_disk_path)
-            return current_frame
+            page_frame_num = self.__load_new_frame(page_disk_path)
+        else:
+            self._increment_pin(page_frame_num)
         
-        current_frame:Frame = self.frames[page_frame_num]
-        current_frame.increment_pin()
-        return current_frame
+        return page_frame_num
     
     def get_page_has_capacity(self, page_range_index, record_column, page_index) -> Union[bool, None]:
         '''Returns True if the page has capacity for more records'''
@@ -140,12 +131,11 @@ class BufferPool:
                 if (self.available_frames_queue.empty() and not self.__replacement_policy()):
                     return None
                 
-                current_frame:Frame = self.__load_new_frame(page_disk_path)
-                current_frame.decrement_pin()
-                return current_frame.get_page_capacity()
+                page_frame_num = self.__load_new_frame(page_disk_path)
+                self._decrement_pin(page_frame_num)
+                return self._get_page_capacity(page_frame_num)
             
-        current_frame:Frame = self.frames[page_frame_num]
-        return current_frame.get_page_capacity()
+        return self._get_page_capacity(page_frame_num)
     
     def read_page_slot(self, page_range_index, record_column, page_index, slot_index) -> Union[int, None]:
         '''Returns the value within a page if the page can be grabbed from disk,
@@ -158,12 +148,11 @@ class BufferPool:
                 if (self.available_frames_queue.empty() and not self.__replacement_policy()):
                     return None
 
-                current_frame:Frame = self.__load_new_frame(page_disk_path)
-                return current_frame.page.get(slot_index)
+                page_frame_num = self.__load_new_frame(page_disk_path)
+                return self.frame_pages[page_frame_num].get(slot_index)
 
-        current_frame:Frame = self.frames[page_frame_num]
-        current_frame.increment_pin()
-        return current_frame.page.get(slot_index)
+        self._increment_pin(page_frame_num)
+        return self.frame_pages[page_frame_num].get(slot_index)
     
     def write_page_slot(self, page_range_index, record_column, page_index, slot_index, value) -> bool:
         '''Writes a value to a page slot'''
@@ -171,40 +160,36 @@ class BufferPool:
 
         with self.bufferpool_lock:
             page_frame_num = self.frame_directory.get(page_disk_path, None)
-            current_frame:Frame = None
 
             if (page_frame_num is None):
                 if (self.available_frames_queue.empty() and not self.__replacement_policy()):
                     return False
 
-                current_frame:Frame = self.__load_new_frame(page_disk_path)
+                page_frame_num = self.__load_new_frame(page_disk_path)
             else:
-                current_frame:Frame = self.frames[page_frame_num]
-                current_frame.increment_pin()
+                self._increment_pin(page_frame_num)
 
-        current_frame.write_precise_with_lock(slot_index, value)
-        current_frame.decrement_pin()
+        self._write_precise_with_lock(page_frame_num, slot_index, value)
+        self._decrement_pin(page_frame_num)
         return True
     
     def write_page_next(self, page_range_index, record_column, page_index, value) -> Union[int, None]:
         '''Write a value to page and returns the slot it was written to, returns None if unable to locate frame'''
         page_disk_path = self.get_page_path(page_range_index, record_column, page_index)
         page_frame_num = self.frame_directory.get(page_disk_path, None)
-        current_frame:Frame = None
 
         if (page_frame_num is None):
             if (self.available_frames_queue.empty() and not self.__replacement_policy()):
                 for i in range(MAX_NUM_FRAME):
-                    print(f"Frame {i} has pin {self.frames[i].pin}")
+                    print(f"Frame {i} has pin {self.frame_pins[i]}")
                 raise MemoryError("Unable to allocate new frame")
 
-            current_frame:Frame = self.__load_new_frame(page_disk_path)
+            page_frame_num = self.__load_new_frame(page_disk_path)
         else:
-            current_frame:Frame = self.frames[page_frame_num]
-            current_frame.increment_pin()
+            self._increment_pin(page_frame_num)
 
-        slot_index = current_frame.write_with_lock(value)
-        current_frame.decrement_pin()
+        slot_index = self._write_with_lock(page_frame_num, value)
+        self._decrement_pin(page_frame_num)
         return slot_index
     
     def get_page_frame_num(self, page_range_index, record_column, page_index) -> Union[int, None]:
@@ -218,7 +203,7 @@ class BufferPool:
     
     def mark_frame_used(self, frame_num):
         '''Use this to close a frame once a page has been used'''
-        self.frames[frame_num].decrement_pin()
+        self._decrement_pin(frame_num)
 
     def unload_all_frames(self):
         '''Unloads all frames in the bufferpool'''
@@ -229,39 +214,20 @@ class BufferPool:
                 if (fail_count > MAX_NUM_FRAME):
                     raise MemoryError("Unable to unload all frames")
 
-    def __load_new_frame(self, page_path:str) -> Frame:
-        '''Loads a new frame into the bufferpool'''
+    def __load_new_frame(self, page_path:str) -> int:
+        '''Loads a new frame into the bufferpool and returns the frame number'''
         
         # Note: block inside get can be used to block transactions until a frame is available (Milestone 3)
-        page_frame_num = self.available_frames_queue.get()
-        current_frame:Frame = self.frames[page_frame_num]
-        current_frame.increment_pin()
+        frame_num = self.available_frames_queue.get()
+        self._increment_pin(frame_num)
 
-        current_frame.load_page(page_path)
-        self.frame_directory[page_path] = page_frame_num
-        #print(f"Loading frame {page_frame_num} with {page_path}")
+        self._load_page_to_frame(frame_num, page_path)
+        self.frame_directory[page_path] = frame_num
+        #print(f"Loading frame {frame_num} with {page_path}")
 
-        self.unavailable_frames_queue.put(page_frame_num)
+        self.unavailable_frames_queue.put(frame_num)
 
-        return current_frame
-    
-    # Refactoring in progress
-    # def __frame_load_policy(self, page_disk_path) -> Frame:
-    #     '''Returns a frame with the disk path, returns false if failed'''
-    #     page_frame_num = self.frame_directory.get(page_disk_path, None)
-    #     current_frame:Frame = None
-
-    #     if (page_frame_num is None):
-    #         if (self.available_frames_queue.empty() and not self.__replacement_policy()):
-    #             # If no frames are available and we were unable to diallocate frames due to lock then returns None
-    #             return False
-
-    #         current_frame:Frame = self.__load_new_frame(page_disk_path)
-    #     else:
-    #         current_frame:Frame = self.frames[page_frame_num]
-    #         current_frame.increment_pin()
-
-    #     return current_frame
+        return frame_num
         
     def __replacement_policy(self) -> bool:
         '''
@@ -272,13 +238,12 @@ class BufferPool:
 
         for _ in range(num_used_frames):
             frame_num = self.unavailable_frames_queue.get()
-            current_frame:Frame = self.frames[frame_num]
 
-            if (current_frame.pin == 0):
-                #print(f"deleting {current_frame.page_path} from frame_directory")
+            if (self.frame_pins[frame_num] == 0):
+                #print(f"deleting {self.frame_page_paths[frame_num]} from frame_directory")
                 # If the frame is not being used by any processes then we can deallocate it
-                del self.frame_directory[current_frame.page_path]
-                current_frame.unload_page()
+                del self.frame_directory[self.frame_page_paths[frame_num]]
+                self._unload_page_from_frame(frame_num)
                 self.available_frames_queue.put(frame_num)
                 return True
             else:
