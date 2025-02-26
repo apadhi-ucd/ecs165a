@@ -1,47 +1,56 @@
-import lstore.config as config
+from lstore.config import *
+import struct
+import base64
+import zlib
 
 class Page:
 
     def __init__(self):
         self.num_records = 0                    
-        self.data = bytearray(config.PAGE_SIZE) 
+        self.data = bytearray(PAGE_SIZE) 
 
     """
     Returns true if the page has capacity to store another record
     """
     def has_capacity(self):
-        return self.num_records < config.PAGE_CAPACITY
+        return self.num_records < MAX_RECORD_PER_PAGE
 
     """
     Writes an integer value to the page
     :param value: int - Integer value to write
     """
     def write(self, value):
-        # Write the value to the page
-        if not self.has_capacity():
-            return False
-        
-        # Calculate the offset
-        offset = self.num_records * 8
-        
-        # Write the value to the page
-        value_bytes = value.to_bytes(8, byteorder='big', signed=True)
-        self.data[offset:offset+8] = value_bytes
+        struct.pack_into("i", self.data, self.num_records * INTEGER_BYTE_SIZE, value)
         self.num_records += 1
-        return True
-    
-    """
-    Reads an integer value from the page
-    :param index: int - Index of the record to read
-    """
-    def read(self, index):
-        # Read the value from the page
-        if index >= self.num_records:
-            return None
-            
-        # Calculate the offset
-        offset = index * 8
+        return (self.num_records - 1)
 
-        # Read the value from the page
-        value_bytes = self.data[offset:offset+8]
-        return int.from_bytes(value_bytes, byteorder='big', signed=True)
+    def write_precise(self, index, value):
+        '''
+        This function should be able to write data on a precise index inside the table.
+        Useful for changing the indirection column on the base page
+        '''
+        struct.pack_into("i", self.data, index * INTEGER_BYTE_SIZE, value)
+
+    def get(self, index):
+        '''This function should be able to grab a data located at a certain index in the page'''
+        return struct.unpack_from("i", self.data, index * INTEGER_BYTE_SIZE)[0]
+    
+    def read(self, index):
+        '''Alias for get() to maintain compatibility with existing code'''
+        return self.get(index)
+    
+    def serialize(self):
+        '''Returns page metadata as a JSON-compatible dictionary'''
+        compressed_data = zlib.compress(self.data)
+        return {
+            "num_records": self.num_records,
+
+            # converts bytearray into b64, which is then converted into a string (JSON compatible)
+            "data": base64.b64encode(compressed_data).decode('utf-8')
+        }
+
+    def deserialize(self, json_data):
+        '''Loads a page from serialized data'''
+        self.num_records = json_data["num_records"]
+        compressed_data = base64.b64decode(json_data["data"])
+        self.data = bytearray(zlib.decompress(compressed_data))

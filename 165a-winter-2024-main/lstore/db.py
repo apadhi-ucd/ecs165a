@@ -1,51 +1,72 @@
+import os
+import json
 from lstore.table import Table
-import msgpack
+from lstore.index import Index
 from BTrees.OOBTree import OOBTree
+import atexit
+import shutil
 
-class Database:
-    """
-    Database class that manages all tables
-    """
-    def __init__(self):
-        self.tables = OOBTree()  # Dictionary mapping table names to Table objects
-        self.path = None  # File prefix for persistence
+class Database():
 
-    # Not required for milestone1
-    def open(self, path):
-        """Loads database metadata and record data from disk; reconstructs tables."""
+    def __init__(self, path="ECS165 DB"):
+        self.tables:dict = {}
         self.path = path
-        try:
-            with open(path + "_index.msgpack", "rb") as file:
-                data = file.read()
-                if not data:
-                    self.tables = OOBTree()
-                else:
-                    metadata = msgpack.unpackb(data, raw=False)
-                    # Handle old list format by ignoring metadata.
-                    if isinstance(metadata, dict):
-                        self.tables = OOBTree()
-                        from lstore.table import Table
-                        for name, info in metadata.items():
-                            table = Table(name, info[0], info[1])
-                            # NEW: Load table records from disk
-                            table.load_records(path)
-                            # Removed table.reset() to retain loaded records.
-                            self.tables[name] = table
-                    else:
-                        self.tables = OOBTree()
-        except FileNotFoundError:
-            self.tables = OOBTree()
+        self.no_path_set = True
+        atexit.register(self.__remove_db_path)
+        
+
+    def open(self, path):
+        """Loads database from disk and restores tables, indexes, and pages"""
+        self.path = path
+        self.no_path_set = False
+
+        # create new path if database path doesn't exist
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        atexit.unregister(self.__remove_db_path)
+        
+        # grab table metadata
+        # this logic will be skipped if opening for the first time -- close() aggregates all table metadata into tables.json path
+        tables_metadata_path = os.path.join(path, "tables.json")
+        if os.path.exists(tables_metadata_path):
+            with open(tables_metadata_path, "r") as file:
+                tables_metadata = json.load(file)
+
+                # loops through tables and adds them to the self.tables dictionary
+                for table_name, table_info in tables_metadata.items():
+                    table = Table(table_name, table_info["num_columns"], table_info["key_index"], self.path)
+                    self.tables[table_name] = table
+
+                    # restore table metadata
+                    table.deserialize(table_info)
+                    
 
     def close(self):
-        """Saves the database metadata and record data to disk using msgpack."""
-        if self.path:
-            # Persist table metadata instead of entire Table objects.
-            metadata = {name: [table.num_columns, table.key] for name, table in self.tables.items()}
-            with open(self.path + "_index.msgpack", "wb") as file:
-                file.write(msgpack.packb(metadata, use_bin_type=True))
-            # NEW: Persist each table’s record data
-            for table in self.tables.values():
-                table.persist_records(self.path)
+        """Flushes dirty pages back to disk, saves table metadata and shuts down"""
+        # if self.no_path_set:
+        #     raise ValueError("Database path is not set. Use open() before closing.")
+        
+        tables_metadata = {}
+
+        for table_name, table in self.tables.items():
+            # flush dirty pages from table's bufferpool
+            table.bufferpool.unload_all_frames()
+
+            # serialize table metadata
+            tables_metadata[table_name] = table.serialize()
+
+            # clear each table's bufferpool to free memory
+            table.bufferpool = None
+
+        # save all tables' metadata to disk
+        tables_metadata_path = os.path.join(self.path, "tables.json")
+        with open(tables_metadata_path, "w", encoding="utf-8") as file:
+            json.dump(tables_metadata, file, indent=4)
+
+        # clear memory references
+        self.tables = {}
+
 
     """
     # Creates a new table
@@ -54,40 +75,32 @@ class Database:
     :param key: int             #Index of table key in columns
     """
     def create_table(self, name, num_columns, key_index):
+        if self.tables.get(name) is not None:
+            raise NameError(f"Error creating Table! Following table already exists: {name}")
 
-        # If table exists, return existing table
-        if name in self.tables: 
-            print("Table already exists")
-            return self.tables[name]
-        
-        # Create table
-        table = Table(name, num_columns, key_index)
-        self.tables[name] = table
-        self.close()  # Save metadata changes
+        self.tables[name] = Table(name, num_columns, key_index, self.path)
+        return self.tables[name]
 
-        # Return table
-        return table
-
+    
     """
     # Deletes the specified table
-    :param name: string         #Table name
     """
     def drop_table(self, name):
+        if self.tables.get(name) is None:
+            raise NameError(f"Error dropping Table! Following table does not exist: {name}")
         
-        # If table does not exist, return
-        if name not in self.tables:
-            print("Table does not exist")
-            return
-        Table.delete_data(self.path, name)  # Delete stored table data
         del self.tables[name]
-        self.close()  # Save metadata changes
-
 
     
     """
     # Returns table with the passed name
-    :param name: string         #Table name
     """
     def get_table(self, name):
-
+        if self.tables.get(name) is None:
+            raise NameError(f"Error getting Table! Following table does not exist: {name}")
+        
         return self.tables[name]
+    
+    def __remove_db_path(self):
+        if os.path.exists(self.path):
+            shutil.rmtree(self.path)
