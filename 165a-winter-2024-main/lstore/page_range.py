@@ -6,172 +6,181 @@ from typing import Type
 import queue
 
 class MergeRequest:
-    '''Holds information about tail pages scheduled for merging'''
-    def __init__(self, range_idx, terminate=False):
-        self.terminate = terminate
-        self.range_idx = range_idx
+    '''Stores metadata about tail pages scheduled for merging operations'''
+    def __init__(self, page_range_index, turn_off=False):
+        self.turn_off = turn_off
+        self.page_range_index = page_range_index
 
 class PageRange:
     '''
-    Manages a range of pages containing all columns of records.
-    Base page indirection columns contain logical record IDs pointing to corresponding tail records.
+    PageRange maintains column data for records
+    Base page indirection column points to corresponding tail record via logical_rid
     '''
 
-    def __init__(self, range_idx, col_count, bufferpool:BufferPool):
+    def __init__(self, page_range_index, num_columns, bufferpool:BufferPool):
         self.bufferpool = bufferpool
-        self.record_locations = {}
-        '''Maps logical record IDs to physical locations for each user column'''
-        self.next_logical_id = MAX_RECORD_PER_PAGE_RANGE
-        '''Counter for assigning logical IDs to updates'''
+        self.page_range_index = page_range_index
+        self.page_range_lock = threading.Lock()
+        
+        # Mapping between logical rids and physical storage locations
+        self.logical_directory = {}
+        
+        # Counter for assigning logical rids to record updates
+        self.logical_rid_index = MAX_RECORD_PER_PAGE_RANGE
+        
+        # Total columns including metadata columns
+        self.total_num_columns = num_columns + NUM_HIDDEN_COLUMNS
+        
+        # Current tail page index for each column
+        self.tail_page_index = [MAX_PAGE_RANGE] * self.total_num_columns
+        
+        # Tail page sequence counter
+        self.tps = 0
+        
+        # Queue for recycling logical rids
+        self.allocation_logical_rid_queue = queue.Queue()
 
-        self.total_columns = col_count + NUM_HIDDEN_COLUMNS
-        '''Total column count including hidden system columns'''
+    def __normalize_rid(self, rid) -> int:
+        '''Normalizes a record ID to fit within page range boundaries'''
+        return rid % MAX_RECORD_PER_PAGE_RANGE
 
-        self.tail_page_counters = [MAX_PAGE_RANGE] * self.total_columns
-        '''Current tail page index for each column'''
+    def __get_hidden_column_location(self, logical_rid) -> tuple[int, int]:
+        '''Calculates physical location for metadata columns given a logical rid'''
+        pg_idx = logical_rid // MAX_RECORD_PER_PAGE
+        pg_pos = logical_rid % MAX_RECORD_PER_PAGE
+        return pg_idx, pg_pos
+    
+    def __get_known_column_location(self, logical_rid, column) -> tuple[int, int]:
+        '''Retrieves physical location for data columns from logical directory'''
+        phys_location = self.logical_directory[logical_rid][column - NUM_HIDDEN_COLUMNS]
+        pg_idx = phys_location // MAX_RECORD_PER_PAGE
+        pg_pos = phys_location % MAX_RECORD_PER_PAGE
+        return pg_idx, pg_pos
+    
+    # API methods
+    
+    def get_column_location(self, logical_rid, column) -> tuple[int, int]:
+        '''Determines physical storage location for a column based on logical rid'''
+        if (column < NUM_HIDDEN_COLUMNS):
+            return self.__get_hidden_column_location(logical_rid)
+        else:
+            return self.__get_known_column_location(logical_rid, column)
+    
+    def has_capacity(self, rid) -> bool:
+        '''Checks if base pages can accommodate the given record ID'''
+        return rid < (self.page_range_index * MAX_PAGE_RANGE * MAX_RECORD_PER_PAGE) 
 
-        self.update_counter = 0
-        '''Tail page sequence count'''
-
-        self.access_lock = threading.Lock()
-        self.range_idx = range_idx
-
-        '''Queue for recycling logical record IDs'''
-        self.logical_id_queue = queue.Queue()
-
-    def write_base_record(self, page_idx, slot_idx, column_values) -> bool:
-        '''Write a complete base record across all column pages'''
-        column_values[INDIRECTION_COLUMN] = self.__normalize_id(column_values[RID_COLUMN])
-        for (col_idx, value) in enumerate(column_values):
-            self.bufferpool.write_page_slot(self.range_idx, col_idx, page_idx, slot_idx, value)
-        with self.access_lock:
-            self.update_counter += 1
+    def assign_logical_rid(self) -> int:
+        '''Allocates a logical rid either from recycled queue or by incrementing counter'''
+        if not self.allocation_logical_rid_queue.empty():
+            return self.allocation_logical_rid_queue.get()
+        else:
+            self.logical_rid_index += 1
+            return self.logical_rid_index - 1
+    
+    def write_base_record(self, page_index, page_slot, columns) -> bool:
+        '''Stores a new record in base pages and updates sequence counter'''
+        columns[INDIRECTION_COLUMN] = self.__normalize_rid(columns[RID_COLUMN])
+        for (col_idx, col_val) in enumerate(columns):
+            self.bufferpool.write_page_slot(self.page_range_index, col_idx, page_index, page_slot, col_val)
+        with self.page_range_lock:
+            self.tps += 1
         return True
     
-    def copy_base_record(self, page_idx, slot_idx) -> list:
-        '''Retrieve all column values for a base record - mainly used during merge operations'''
-        record_data = [None] * self.total_columns
-        
-        # Read all column values from buffer pool
-        for col_idx in range(self.total_columns):
-            record_data[col_idx] = self.bufferpool.read_page_slot(self.range_idx, col_idx, page_idx, slot_idx)
+    def write_tail_record(self, logical_rid, *columns) -> bool:
+        '''Appends update record to tail pages and updates directory mapping'''
 
-        # Mark frames as recently used
-        for col_idx in range(self.total_columns):
-            frame_idx = self.bufferpool.get_page_frame_num(self.range_idx, col_idx, page_idx)
-            self.bufferpool.mark_frame_used(frame_idx)
+        self.logical_directory[logical_rid] = [None] * (self.total_num_columns - NUM_HIDDEN_COLUMNS)
+
+        for (col_idx, col_val) in enumerate(columns):
+            if (col_val is None):
+                continue
+            
+            # Check if current tail page has space available
+            space_available = self.bufferpool.get_page_has_capacity(self.page_range_index, col_idx, self.tail_page_index[col_idx])
+
+            if not space_available:
+                self.tail_page_index[col_idx] += 1
+
+            elif space_available is None:
+                return False
+                
+            slot_position = self.bufferpool.write_page_next(self.page_range_index, col_idx, self.tail_page_index[col_idx], col_val)
+
+            # Only map non-metadata columns in the directory
+            if (col_idx >= NUM_HIDDEN_COLUMNS):
+                self.logical_directory[logical_rid][col_idx - NUM_HIDDEN_COLUMNS] = (self.tail_page_index[col_idx] * MAX_RECORD_PER_PAGE) + slot_position
+
+        with self.page_range_lock:
+            self.tps += 1
+        return True
+    
+    def read_tail_record_column(self, logical_rid, column) -> int:
+        '''Retrieves column value from tail pages and marks buffer frame as accessed'''
+        pg_idx, pg_pos = self.get_column_location(logical_rid, column)
+        value = self.bufferpool.read_page_slot(self.page_range_index, column, pg_idx, pg_pos)
+        frame_id = self.bufferpool.get_page_frame_num(self.page_range_index, column, pg_idx)
+        self.bufferpool.mark_frame_used(frame_id)
+        return value
+    
+    def copy_base_record(self, page_index, page_slot) -> list:
+        '''Retrieves complete record data from base pages for merge operations'''
+        record_data = [None] * self.total_num_columns
+        
+        # Fetch all column values
+        for col_idx in range(self.total_num_columns):
+            record_data[col_idx] = self.bufferpool.read_page_slot(self.page_range_index, col_idx, page_index, page_slot)
+
+        # Update frame access metadata
+        for col_idx in range(self.total_num_columns):
+            frame_id = self.bufferpool.get_page_frame_num(self.page_range_index, col_idx, page_index)
+            self.bufferpool.mark_frame_used(frame_id)
 
         return record_data
     
-    def find_records_last_logical_id(self, logical_id):
-        '''Follow indirection pointers to find the most recent logical ID for a record chain'''
-        latest_id = logical_id
-        while (logical_id >= MAX_RECORD_PER_PAGE_RANGE):
-            latest_id = logical_id
-            page_idx, slot_pos = self.get_column_location(logical_id, INDIRECTION_COLUMN)
-            logical_id = self.bufferpool.read_page_slot(self.range_idx, INDIRECTION_COLUMN, page_idx, slot_pos)
-            frame_idx = self.bufferpool.get_page_frame_num(self.range_idx, INDIRECTION_COLUMN, page_idx)
-            if (frame_idx):
-                self.bufferpool.mark_frame_used(frame_idx)
+    def find_records_last_logical_rid(self, logical_rid):
+        '''Traverses update chain to find most recent version of a record'''
+        latest_rid = logical_rid
+        while (logical_rid >= MAX_RECORD_PER_PAGE_RANGE):
+            latest_rid = logical_rid
+            pg_idx, pg_pos = self.get_column_location(logical_rid, INDIRECTION_COLUMN)
+            logical_rid = self.bufferpool.read_page_slot(self.page_range_index, INDIRECTION_COLUMN, pg_idx, pg_pos)
+            frame_id = self.bufferpool.get_page_frame_num(self.page_range_index, INDIRECTION_COLUMN, pg_idx)
+            if (frame_id):
+                self.bufferpool.mark_frame_used(frame_id)
 
-        return latest_id
+        return latest_rid
 
-    def write_tail_record(self, logical_id, *column_values) -> bool:
-        '''Store updated column values in tail pages and return success status'''
-
-        self.record_locations[logical_id] = [None] * (self.total_columns - NUM_HIDDEN_COLUMNS)
-
-        for (col_idx, value) in enumerate(column_values):
-            if (value is None):
-                continue
-            
-            # Check if current tail page has room or move to next page
-            has_space = self.bufferpool.get_page_has_capacity(self.range_idx, col_idx, self.tail_page_counters[col_idx])
-
-            if not has_space:
-                self.tail_page_counters[col_idx] += 1
-            elif has_space is None:
-                return False
-                
-            slot_pos = self.bufferpool.write_page_next(self.range_idx, col_idx, self.tail_page_counters[col_idx], value)
-
-            # Only map user columns (skip hidden system columns)
-            if (col_idx >= NUM_HIDDEN_COLUMNS):
-                physical_pos = (self.tail_page_counters[col_idx] * MAX_RECORD_PER_PAGE) + slot_pos
-                self.record_locations[logical_id][col_idx - NUM_HIDDEN_COLUMNS] = physical_pos
-
-        with self.access_lock:
-            self.update_counter += 1
-        return True
-    
-    def read_tail_record_column(self, logical_id, col_idx) -> int:
-        '''Retrieve a specific column value from tail records given a logical ID'''
-        page_idx, slot_pos = self.get_column_location(logical_id, col_idx)
-        value = self.bufferpool.read_page_slot(self.range_idx, col_idx, page_idx, slot_pos)
-        frame_idx = self.bufferpool.get_page_frame_num(self.range_idx, col_idx, page_idx)
-        self.bufferpool.mark_frame_used(frame_idx)
-        return value
-    
-    def get_column_location(self, logical_id, col_idx) -> tuple[int, int]:
-        '''Find the physical location of a column value for a given logical ID'''
-        if (col_idx < NUM_HIDDEN_COLUMNS):
-            return self.__locate_system_column(logical_id)
-        else:
-            return self.__locate_user_column(logical_id, col_idx)
-    
-    def __locate_system_column(self, logical_id) -> tuple[int, int]:
-        '''Calculate location for system (hidden) columns which use fixed layout'''
-        page_idx = logical_id // MAX_RECORD_PER_PAGE
-        slot_pos = logical_id % MAX_RECORD_PER_PAGE
-        return page_idx, slot_pos
-    
-    def __locate_user_column(self, logical_id, col_idx) -> tuple[int, int]:
-        '''Look up location for user-defined columns using the location directory'''
-        physical_pos = self.record_locations[logical_id][col_idx - NUM_HIDDEN_COLUMNS]
-        page_idx = physical_pos // MAX_RECORD_PER_PAGE
-        slot_pos = physical_pos % MAX_RECORD_PER_PAGE
-        return page_idx, slot_pos
-    
-    def __normalize_id(self, record_id) -> int:
-        '''Calculate a page-range relative ID from a global record ID'''
-        return record_id % MAX_RECORD_PER_PAGE_RANGE
-
-    def has_capacity(self, record_id) -> bool:
-        '''Check if this page range can accommodate a record with the given ID'''
-        return record_id < (self.range_idx * MAX_PAGE_RANGE * MAX_RECORD_PER_PAGE) 
-
-    def assign_logical_id(self) -> int:
-        '''Allocate a logical ID for a new tail record, reusing IDs when possible'''
-        if not self.logical_id_queue.empty():
-            return self.logical_id_queue.get()
-        else:
-            self.next_logical_id += 1
-            return self.next_logical_id - 1
+    # Serialization methods
     
     def serialize(self):
-        '''Convert page range metadata to JSON-compatible dictionary format'''
+        '''Converts page range state to serializable dictionary format'''
         return {
-            "logical_directory": self.record_locations,
-            "tail_page_index": self.tail_page_counters,
-            "logical_rid_index": self.next_logical_id,
-            "tps": self.update_counter
+            "logical_directory": self.logical_directory,
+            "tail_page_index": self.tail_page_index,
+            "logical_rid_index": self.logical_rid_index,
+            "tps": self.tps
         }
     
-    def deserialize(self, stored_data):
-        '''Restore page range state from serialized data'''
-        self.record_locations = {int(k): v for k, v in stored_data["logical_directory"].items()}
-        self.tail_page_counters = stored_data["tail_page_index"]
-        self.next_logical_id = stored_data["logical_rid_index"]
-        self.update_counter = stored_data["tps"]
+    def deserialize(self, json_data):
+        '''Reconstructs page range state from serialized data'''
+        self.logical_directory = {int(k): v for k, v in json_data["logical_directory"].items()}
+        self.tail_page_index = json_data["tail_page_index"]
+        self.logical_rid_index = json_data["logical_rid_index"]
+        self.tps = json_data["tps"]
 
+    # Magic methods
+    
     def __hash__(self):
-        return self.range_idx
+        return self.page_range_index
     
     def __eq__(self, other:Type['PageRange']):
-        return self.range_idx == other.range_idx
+        return self.page_range_index == other.page_range_index
     
     def __str__(self):
         return json.dumps(self.serialize())
 
     def __repr__(self):
         return json.dumps(self.serialize())
+    
+    
