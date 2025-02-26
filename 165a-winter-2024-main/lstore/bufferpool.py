@@ -1,13 +1,3 @@
-'''
-Every access to Memory should go through the bufferpool
-The format for the page placement inside the disk is as follows
-DB Directory: Folder
-    -> TableName: Folder
-        -> PageRange_{page_range_index}: Folder
-            -> Page_{record_column}_{page_index}.bin: File
-'''
-
-
 from lstore.config import MAX_NUM_FRAME, NUM_HIDDEN_COLUMNS
 from lstore.page import Page
 import os
