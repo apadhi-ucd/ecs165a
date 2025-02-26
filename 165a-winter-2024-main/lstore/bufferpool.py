@@ -8,7 +8,6 @@ from typing import List, Union
 
 
 class BufferPool:
-    '''Every access to pages should go through the bufferpool'''
     def __init__(self, table_path, num_columns):
         self.frame_directory = dict()  # Maps page paths to frame numbers
         self.num_frames = MAX_NUM_FRAME * (num_columns + NUM_HIDDEN_COLUMNS)
