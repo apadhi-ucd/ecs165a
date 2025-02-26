@@ -49,10 +49,6 @@ class Query:
             if len(values) != self.table.num_columns: # If the number of values is not equal to the number of columns, then the record is invalid
                 return False
             
-            existing_records = self.table.index.locate(self.table.key, values[self.table.key])
-            if existing_records:
-                return False  
-            
             # Create a new record
             new_rid = self.table.new_rid()
             active_page_range = self.table.page_range[self.table.page_range_index]
@@ -131,7 +127,7 @@ class Query:
             
             return retrieved_records
         except:
-            return False
+            return self.get_records(search_key, search_key_index, projected_columns_index)
 
     """
     # Updates all records with the given key

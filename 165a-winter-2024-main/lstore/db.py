@@ -12,21 +12,40 @@ class Database:
 
     # Not required for milestone1
     def open(self, path):
-        """Loads database metadata from a file if it exists, otherwise initializes a new one."""
+        """Loads database metadata and record data from disk; reconstructs tables."""
         self.path = path
-
         try:
             with open(path + "_index.msgpack", "rb") as file:
-                self.tables = msgpack.unpackb(file.read(), raw=False)
+                data = file.read()
+                if not data:
+                    self.tables = OOBTree()
+                else:
+                    metadata = msgpack.unpackb(data, raw=False)
+                    # Handle old list format by ignoring metadata.
+                    if isinstance(metadata, dict):
+                        self.tables = OOBTree()
+                        from lstore.table import Table
+                        for name, info in metadata.items():
+                            table = Table(name, info[0], info[1])
+                            # NEW: Load table records from disk
+                            table.load_records(path)
+                            # Removed table.reset() to retain loaded records.
+                            self.tables[name] = table
+                    else:
+                        self.tables = OOBTree()
         except FileNotFoundError:
-            self.tables = OOBTree()  # Start fresh if no file exists
+            self.tables = OOBTree()
 
     def close(self):
-        """Saves the database index (metadata) to disk using msgpack."""
+        """Saves the database metadata and record data to disk using msgpack."""
         if self.path:
+            # Persist table metadata instead of entire Table objects.
+            metadata = {name: [table.num_columns, table.key] for name, table in self.tables.items()}
             with open(self.path + "_index.msgpack", "wb") as file:
-                file.write(msgpack.packb(self.tables, use_bin_type=True))
-
+                file.write(msgpack.packb(metadata, use_bin_type=True))
+            # NEW: Persist each table’s record data
+            for table in self.tables.values():
+                table.persist_records(self.path)
 
     """
     # Creates a new table
@@ -39,8 +58,7 @@ class Database:
         # If table exists, return existing table
         if name in self.tables: 
             print("Table already exists")
-            self.tables[name] = table
-            return table
+            return self.tables[name]
         
         # Create table
         table = Table(name, num_columns, key_index)
