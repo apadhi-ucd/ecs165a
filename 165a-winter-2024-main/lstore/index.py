@@ -1,316 +1,391 @@
-from BTrees.OOBTree import OOBTree
+"""
+A data strucutre holding indices for various columns of a table. Key column should be indexd by default, other columns can be indexed through this object. Indices are usually B-Trees, but other data structures can be used as well.
+"""
+import base64
+import re
 from lstore.config import *
-import json
-from typing import List, Set, Dict, Union, Any
+from BTrees.OOBTree import OOBTree
+import pickle
+import os
 
 class Index:
 
     def __init__(self, table):
+
+        self.indices = [None] * table.num_columns
+
+        """
+        #maps primary key to its most updated column values
+        #self.value_mapper[primary_key] = [column1_value, column2_value...]
+        """
+        self.value_mapper = OOBTree()
+
+        self.num_columns = table.num_columns
+        self.key = table.key
         self.table = table
-        self.indices = {}
-        '''Maps column_number to a BTree'''
-        self.value_mapper = {}
-        '''Maps column_number to a dictionary that maps values to a set of rids'''
-        self.create_index(table.key)
+        #table.deserialize()
+
+        self.create_index(self.key)
+
+        #self.index_directory = os.path.join(table.table_path, "Index")
+        #self.path_to_value_mapper = os.path.join(self.index_directory, "Value_Mapper.pkl")
+
+        #if not os.path.exists(self.index_directory):
+        #    os.makedirs(self.index_directory)
+
+        #primary index and value mapper are recreated upon reopening db
+
+        #self.deserialize()
+
         self.__generate_primary_index()
 
+
+
+
+    """
+    # returns the location of all records with the given value on column "column" as a list
+    # returns None if no rid found
+    """
     def locate(self, column, value):
-        '''
-        Returns the location of all records with the given value on column "column"
-        '''
-        if column not in self.indices:
-            return None
-        
-        if value not in self.value_mapper[column]:
-            return None
-        
-        return self.value_mapper[column][value]
+
+        return list(self.indices[column].get(value, [])) or None
+
+    """
+    # Returns the RIDs of all records with values in column "column" between "begin" and "end" as a list
+    # returns None if no rid found
+    """
 
     def locate_range(self, begin, end, column):
-        '''
-        Returns the RIDs of all records with values in column "column" between "begin" and "end"
-        '''
-        if column not in self.indices:
-            return None
-        
-        rids = set()
-        for key in self.indices[column].keys(begin, end):
-            rids.update(self.value_mapper[column].get(key, set()))
-        
-        return rids if rids else None
 
+        return [rid for sublist in self.indices[column].values(min=begin, max=end) for rid in sublist.keys()] or None
+
+
+    """
+    # optional: Create index on specific columns 
+    # index will have key and column mapped as {key_column_value1: [value_column_value1]}
+    # or {key_column_value1: [value_column_value1, value_column_value2...]} if more than one value maps to the same key
+    # create secondary index through primary index and value mapper
+    """
+    """
     def create_index(self, column_number):
-        '''
-        Creates an index on the specified column
-        '''
-        if column_number in self.indices:
-            return False
-        
-        self.indices[column_number] = OOBTree()
-        self.value_mapper[column_number] = {}
-        return True
+        #deserialize value_mapper if lost
 
+        if column_number >= self.table.num_columns:
+            return False
+
+        if self.indices[column_number] == None:
+
+            self.indices[column_number] = OOBTree()
+
+            # go through value mapper to create new index
+            for primary_key, column_values in self.value_mapper.items():
+
+                # get value from value mapper and rid from primary index
+                column_value = column_values[column_number]
+                rid = list(self.indices[self.key][primary_key].keys())[0]
+
+                self.insert_to_index(column_number, column_value, rid)
+
+            return True
+        else:
+            return False
+
+    """
+    # create secondary index through page range and bufferpool    
+    def create_index(self, column_number):
+        #deserialize value_mapper if lost
+
+        if column_number >= self.table.num_columns:
+            return False
+
+        if self.indices[column_number] == None:
+
+            self.indices[column_number] = OOBTree()
+            frames_used = []
+            # go through value mapper to create new index
+            all_base_rids = self.grab_all()
+
+            #read through bufferpool to get latest tail record
+            for rid in all_base_rids:
+
+                page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
+
+                indir_rid = self.table.bufferpool.read_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot)
+                frame_num  = self.table.bufferpool.get_page_frame_num(page_range_index, INDIRECTION_COLUMN, page_index)
+                frames_used.append(frame_num)
+
+
+                """ Referencing latest tail page search from sum version """
+                if indir_rid == (rid % MAX_RECORD_PER_PAGE_RANGE) : # if no updates
+
+                    column_value = self.table.bufferpool.read_page_slot(page_range_index, column_number + NUM_HIDDEN_COLUMNS, page_index, page_slot)
+                    frame_num  = self.table.bufferpool.get_page_frame_num(page_range_index, column_number + NUM_HIDDEN_COLUMNS, page_index)
+                    frames_used.append(frame_num)
+
+                else: #if updates
+
+                    base_timestamp = self.table.bufferpool.read_page_slot(page_range_index, TIMESTAMP_COLUMN, page_index, page_slot)
+                    frame_num  = self.table.bufferpool.get_page_frame_num(page_range_index, TIMESTAMP_COLUMN, page_index)
+                    frames_used.append(frame_num)
+
+                    tail_schema = self.table.page_ranges[page_range_index].read_tail_record_column(indir_rid, SCHEMA_ENCODING_COLUMN)
+                    tail_timestamp = self.table.page_ranges[page_range_index].read_tail_record_column(indir_rid, TIMESTAMP_COLUMN)
+
+                    # if the tail page for column is latest updated 
+                    if (tail_schema >> column_number) & 1 and tail_timestamp >= base_timestamp:
+                    
+                        tail_page_index, tail_slot = self.table.page_ranges[page_range_index].get_column_location(indir_rid, column_number +  NUM_HIDDEN_COLUMNS)
+
+                        column_value = self.table.bufferpool.read_page_slot(page_range_index, column_number + NUM_HIDDEN_COLUMNS, tail_page_index, tail_slot)
+                        frame_num  = self.table.bufferpool.get_page_frame_num(page_range_index, column_number + NUM_HIDDEN_COLUMNS, page_index)
+                        frames_used.append(frame_num)
+
+                    else: # if merged page is latest updated
+                        column_value = self.table.bufferpool.read_page_slot(page_range_index, column_number + NUM_HIDDEN_COLUMNS, page_index, page_slot)
+                        frame_num  = self.table.bufferpool.get_page_frame_num(page_range_index, column_number + NUM_HIDDEN_COLUMNS, page_index)
+                        frames_used.append(frame_num)
+
+
+                #insert {primary_index: {rid: True}} into primary index BTree
+                self.insert_to_index(column_number, column_value, rid)
+
+                for frame in frames_used:
+                    self.table.bufferpool.mark_frame_used(frame)
+
+            return True
+        else:
+            return False
+
+
+    """
+    # optional: Drop index of specific column
+    """
     def drop_index(self, column_number):
-        '''
-        Drops the index on the specified column
-        '''
-        if column_number not in self.indices:
+
+        if column_number >= self.table.num_columns:
+            return False
+
+        # clears Btree and removes reference 
+        if self.indices[column_number] != None:
+
+            self.indices[column_number].clear()
+            self.indices[column_number] = None
+
+            #delete file 
+            #path = os.path.join(self.index_directory, f"index_{column_number}.pkl")
+            #if os.path.isfile(path):
+            #    os.remove(path)
+
+            return True
+        # if the index trying to drop doesn't exist in the dict of secondary indices
+        else:
+            return False
+
+    
+    def delete_from_index(self, column_index, column_value):
+        '''Used to delete a single value from an index'''
+        index:OOBTree = self.indices[column_index]
+
+        if (index is None):
             return False
         
-        del self.indices[column_number]
-        del self.value_mapper[column_number]
-        return True
-
-    def delete_from_index(self, column_index, column_value):
-        '''
-        Deletes a value from the index
-        '''
-        if column_index not in self.indices:
-            return
-        
-        if column_value in self.value_mapper[column_index]:
-            del self.value_mapper[column_index][column_value]
-        
-        if column_value in self.indices[column_index]:
-            del self.indices[column_index][column_value]
+        if (index.get(column_value)):
+            del index[column_value]
+        else:
+            return False
 
     def insert_to_index(self, column_index, column_value, rid):
-        '''
-        Inserts a value into the index
-        '''
-        if column_index not in self.indices:
-            return
-        
-        self.indices[column_index][column_value] = rid
-        
-        if column_value not in self.value_mapper[column_index]:
-            self.value_mapper[column_index][column_value] = set()
-        
-        self.value_mapper[column_index][column_value].add(rid)
+        '''Used to insert the primary key for primary key indexing'''
+        index:OOBTree = self.indices[column_index]
 
+        if (index is None):
+            return False
+        
+        if (not index.get(column_value)):
+            index[column_value] = {}
+
+        index[column_value][rid] = True
+    
+    """
+    # Takes a record and insert it into value_mapper, primary and secondary index
+    """
     def insert_in_all_indices(self, columns):
-        '''
-        Inserts a record into all indices
-        '''
-        rid = columns[RID_COLUMN]
         
-        for column_index in self.indices:
-            if column_index < len(columns) - NUM_HIDDEN_COLUMNS:
-                column_value = columns[column_index + NUM_HIDDEN_COLUMNS]
-                self.insert_to_index(column_index, column_value, rid)
+        primary_key = columns[self.key + NUM_HIDDEN_COLUMNS]
+        if self.indices[self.key].get(primary_key):
+            return False
+        
+        # insert in primary index
+        #self.insert_to_index(self.key, primary_key, columns[RID_COLUMN])
 
+        # map to value mapper
+        self.value_mapper[primary_key] = columns[NUM_HIDDEN_COLUMNS:]
+
+        #if we have secondary index, insert column value into secondary index
+        for i in range(self.num_columns):
+
+            if self.indices[i] != None:
+                column_value = columns[i + NUM_HIDDEN_COLUMNS]
+                rid = columns[RID_COLUMN]
+                self.insert_to_index(i,column_value, rid)
+
+        return True
+
+    """
+    # Remove element associated with primary key from value_mapper, primary and secondary index
+    """
     def delete_from_all_indices(self, primary_key):
-        '''
-        Deletes a record from all indices
-        '''
-        # Get the RID for the primary key
-        primary_key_column = self.table.key
-        
-        if primary_key_column not in self.indices:
-            return
-        
-        if primary_key not in self.value_mapper[primary_key_column]:
-            return
-        
-        rids = self.value_mapper[primary_key_column][primary_key]
-        
-        if not rids:
-            return
-        
-        rid = next(iter(rids))
-        
-        # Get the record's values for each indexed column
-        page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-        
-        if page_range_index >= len(self.table.page_ranges):
-            return
-        
-        page_range = self.table.page_ranges[page_range_index]
-        
-        # Delete from each index
-        for column_index in self.indices:
-            if column_index < self.table.num_columns:
-                column_value = page_range.bufferpool.read_page_slot(
-                    page_range_index, 
-                    column_index + NUM_HIDDEN_COLUMNS, 
-                    page_index, 
-                    page_slot
-                )
-                
-                if column_value is not None:
-                    if column_value in self.value_mapper[column_index] and rid in self.value_mapper[column_index][column_value]:
-                        self.value_mapper[column_index][column_value].remove(rid)
-                        
-                        if not self.value_mapper[column_index][column_value]:
-                            del self.value_mapper[column_index][column_value]
-                            del self.indices[column_index][column_value]
 
+        if not self.indices[self.key].get(primary_key):
+            return False
+        
+        #delete from primary index
+        #self.delete_from_index(self.key, primary_key)
+
+        # if we have secondary index, delete from those too
+        for i in range(self.num_columns):
+
+            if self.indices[i] != None and i != self.key:
+
+                key = self.value_mapper[primary_key][i]
+                rid = list(self.indices[self.key][primary_key].keys())[0]
+
+                del self.indices[i][key][rid]
+
+                if self.indices[i][key] == {}:
+                    del self.indices[i][key]
+
+        #delete from value mapper
+        del self.value_mapper[primary_key]
+
+    
+    """
+    # Update to value_mapper and secondary index
+    """
     def update_all_indices(self, primary_key, columns):
-        '''
-        Updates a record in all indices
-        '''
-        # Get rid from primary key
-        primary_key_column = self.table.key
-        
-        if primary_key_column not in self.indices:
-            return
-        
-        if primary_key not in self.value_mapper[primary_key_column]:
-            return
-        
-        rids = self.value_mapper[primary_key_column][primary_key]
-        
-        if not rids:
-            return
-        
-        rid = next(iter(rids))
-        
-        # Get the record's values for each indexed column
-        page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-        
-        if page_range_index >= len(self.table.page_ranges):
-            return
-        
-        page_range = self.table.page_ranges[page_range_index]
-        
-        # Update each index
-        for column_index in self.indices:
-            if column_index < self.table.num_columns:
-                # Only update if the column is in the update
-                if columns[column_index + NUM_HIDDEN_COLUMNS] is not None:
-                    # Get the old value
-                    old_value = page_range.bufferpool.read_page_slot(
-                        page_range_index, 
-                        column_index + NUM_HIDDEN_COLUMNS, 
-                        page_index, 
-                        page_slot
-                    )
-                    
-                    # Get the new value
-                    new_value = columns[column_index + NUM_HIDDEN_COLUMNS]
-                    
-                    # Update the index
-                    if old_value != new_value:
-                        # Remove the old value
-                        if old_value in self.value_mapper[column_index] and rid in self.value_mapper[column_index][old_value]:
-                            self.value_mapper[column_index][old_value].remove(rid)
-                            
-                            if not self.value_mapper[column_index][old_value]:
-                                del self.value_mapper[column_index][old_value]
-                                del self.indices[column_index][old_value]
-                        
-                        # Add the new value
-                        self.insert_to_index(column_index, new_value, rid)
 
+        #get rid from primary key
+        if not self.indices[self.key].get(primary_key):
+            return False
+        
+        #update new columns in value_mapper
+        for i in range(0, self.num_columns):
+            if columns[NUM_HIDDEN_COLUMNS + i] != None:
+                if self.indices[i] != None:
+            
+
+                    key = self.value_mapper[primary_key][i]
+                    rid = list(self.indices[self.key][primary_key].keys())[0]
+                    #column_value = self.value_mapper[primary_key][]
+
+                    #if changed value is in key column, transfer to new mapping to new key and delete old key
+                    if self.indices[i].get(columns[i + NUM_HIDDEN_COLUMNS]):
+
+                        self.insert_to_index(i, columns[i + NUM_HIDDEN_COLUMNS], rid)
+                        del self.indices[i][key][rid]
+
+                    else:
+                        #self.indices[i][columns[i + NUM_HIDDEN_COLUMNS]] = self.indices[i][key]
+                        self.insert_to_index(i, columns[i + NUM_HIDDEN_COLUMNS], rid)
+                        del self.indices[i][key][rid]
+                        if self.indices[i][key] == {}:
+                    
+                            del self.indices[i][key]
+
+                self.value_mapper[primary_key][i] = columns[i + NUM_HIDDEN_COLUMNS]
+
+        return True
+    
+
+    """
+    # get all rid from primary index for merge
+    """
     def grab_all(self):
-        '''
-        Returns all RIDs in the index
-        '''
-        all_rids = set()
-        
-        for column_index in self.indices:
-            for value in self.value_mapper[column_index]:
-                all_rids.update(self.value_mapper[column_index][value])
-        
-        return all_rids
+        all_rid = []
+        for _, rids in self.indices[self.key].items():
+            for rid in rids:
+                all_rid.append(rid)
+        return all_rid
+    
+    
+    """
+    # Use the methods below for accessing secondary index
+    # decide if you want to create one first using index.create_index(key_column, value_column)
+    # or the value will be searched through value mapper
+    """
 
+    """
+    # basically the same as locate and locate range except it returns value in designated column 
+    # instead of rid when given primary/secondary key and its column number
+    """
     def get(self, key_column_number, value_column_number, key):
-        '''Returns the value of the value_column for the given key'''
         return self.__search_value_mapper(key_column_number, value_column_number, key, key)
 
+
     def get_range(self, key_column_number, value_column_number, begin, end):
-        '''Returns the values of the value_column for the given key range'''
         return self.__search_value_mapper(key_column_number, value_column_number, begin, end)
 
+
     def __search_value_mapper(self, key_column_number, value_column_number, begin, end):
-        '''Helper function for get and get_range'''
-        if key_column_number not in self.indices:
-            return None
-        
-        result = {}
-        
-        for key in self.indices[key_column_number].keys(begin, end):
-            rids = self.value_mapper[key_column_number][key]
-            
-            for rid in rids:
-                page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-                
-                if page_range_index < len(self.table.page_ranges):
-                    page_range = self.table.page_ranges[page_range_index]
-                    value = page_range.bufferpool.read_page_slot(
-                        page_range_index, 
-                        value_column_number + NUM_HIDDEN_COLUMNS, 
-                        page_index, 
-                        page_slot
-                    )
-                    
-                    result[key] = value
-        
-        return result
+        values = []
+        for _, column_values in self.value_mapper.items():
 
+                # get key and values from value mapper
+            value_mapper_key = column_values[key_column_number]
+            value_mapper_value = column_values[value_column_number]
+
+            if begin <= value_mapper_key <= end:
+                values.append(value_mapper_value)
+            
+        return values if values else None
+    
+        
+    # use this when open db
     def __generate_primary_index(self):
-        '''
-        Generates the primary index for the table
-        '''
-        # Initialize a BTree
-        primary_key_column = self.table.key
-        self.indices[primary_key_column] = OOBTree()
-        self.value_mapper[primary_key_column] = {}
-        
-        # Get all RIDs
-        all_rids = self.table.grab_all_base_rids()
-        
-        # Add each RID to the index
-        for rid in all_rids:
+        #initialize a BTree
+        self.indices[self.key] = OOBTree()
+
+        #get base rid for every record with no duplicates
+        all_base_rids = self.table.grab_all_base_rids()
+        frames_used = []
+        #read through bufferpool to get primary index
+        for rid in all_base_rids:
             page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-            
-            if page_range_index < len(self.table.page_ranges):
-                page_range = self.table.page_ranges[page_range_index]
-                primary_key_value = page_range.bufferpool.read_page_slot(
-                    page_range_index, 
-                    primary_key_column + NUM_HIDDEN_COLUMNS, 
-                    page_index, 
-                    page_slot
-                )
-                
-                if primary_key_value is not None:
-                    self.insert_to_index(primary_key_column, primary_key_value, rid)
-
+            primary_key = self.table.bufferpool.read_page_slot(page_range_index, self.key + NUM_HIDDEN_COLUMNS, page_index, page_slot)
+            frame_num  = self.table.bufferpool.get_page_frame_num(page_range_index, self.key + NUM_HIDDEN_COLUMNS, page_index)
+            frames_used.append(frame_num)
+            #insert {primary_index: {rid: True}} into primary index BTree
+            self.insert_to_index(self.key, primary_key, rid)
+        
+        for frame in frames_used:
+            self.table.bufferpool.mark_frame_used(frame)
+    
+    # call "index:": self.index.serialize() from table
+    # pickle every index BTree and then store them in base64
     def serialize(self):
-        '''
-        Serializes the index for storage
-        '''
-        serialized_indices = {}
-        
-        for column_index in self.indices:
-            serialized_indices[str(column_index)] = {
-                "keys": list(self.indices[column_index].keys()),
-                "values": {}
-            }
-            
-            for value in self.value_mapper[column_index]:
-                serialized_indices[str(column_index)]["values"][str(value)] = list(self.value_mapper[column_index][value])
-        
-        return serialized_indices
 
-    def deserialize(self, data):
-        '''
-        Deserializes the index from storage
-        '''
-        self.indices = {}
-        self.value_mapper = {}
+        all_serialized_data = {}
+
+        for i in range(self.num_columns):
+            if self.indices[i] != None:
+                pickled_index = pickle.dumps(self.indices[i])
+                encoded_pickled_index = base64.b64encode(pickled_index).decode('utf-8')
+                all_serialized_data[f"index[{i}]"] = encoded_pickled_index
         
-        for column_index_str, index_data in data.items():
-            column_index = int(column_index_str)
-            self.indices[column_index] = OOBTree()
-            self.value_mapper[column_index] = {}
-            
-            for key in index_data["keys"]:
-                self.indices[column_index][key] = None
-            
-            for value_str, rids in index_data["values"].items():
-                value = int(value_str)
-                self.value_mapper[column_index][value] = set(rids)
-                
-                for rid in rids:
-                    self.indices[column_index][value] = rid
+        pickled_value_mapper= pickle.dumps(self.value_mapper)
+        encoded_pickled_value_mapper = base64.b64encode(pickled_value_mapper).decode('utf-8')
+        all_serialized_data["value_mapper"] = encoded_pickled_value_mapper
+
+        return all_serialized_data
+    
+    # call index.deserialize(json_data["Index"]) from table
+    def deserialize(self, data):
+        if "value_mapper" in data:
+            decoded_value_mapper = base64.b64decode(data["value_mapper"])
+            self.value_mapper = pickle.loads(decoded_value_mapper)
+
+        for i in range(self.num_columns):
+            index_column_number = f"index[{i}]"
+            if index_column_number in data:
+                decoded_index = base64.b64decode(data[index_column_number])
+                self.indices[i] = pickle.loads(decoded_index)

@@ -104,3 +104,4 @@ class Database():
     def __remove_db_path(self):
         if os.path.exists(self.path):
             shutil.rmtree(self.path)
+

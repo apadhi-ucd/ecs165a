@@ -1,9 +1,8 @@
 from lstore.table import Table, Record
-from lstore.index import Index
 from lstore.config import *
-from lstore.page_range import PageRange
+
 from time import time
-import threading
+from queue import Queue
 
 class Query:
     """
@@ -12,76 +11,66 @@ class Query:
     Queries that succeed should return the result or True
     Any query that crashes (due to exceptions) should return False
     """
-
     def __init__(self, table):
-        self.table = table
-        self.frames_used = []
-        self.frames_lock = threading.Lock()
+        self.table:Table = table
         pass
 
+    
     """
     # internal Method
     # Read a record with specified RID
     # Returns True upon succesful deletion
     # Return False if record doesn't exist or is locked due to 2PL
     """
+
+    # Delete was simplified to just locate rid and put it on the queue, then deleting indices. Actual process will occur in merge function
     def delete(self, primary_key):
+
         # Locate the RID associated with the primary key
-        key_column = self.table.key
-        rids = self.table.index.locate(key_column, primary_key)
-        
-        if not rids:
-            return False
-        
-        # Get the first RID (should be only one for a primary key)
-        rid = next(iter(rids))
-        
-        # Delete from all indices
+        base_rid = self.table.index.locate(self.table.key, primary_key)
+        if(base_rid is None):
+            return False  # Record does not exist
+
+        self.table.deallocation_base_rid_queue.put(base_rid[0])
         self.table.index.delete_from_all_indices(primary_key)
-        
-        # Add the RID to the deallocation queue for recycling
-        self.table.deallocation_base_rid_queue.put(rid)
-        
+
+        # Deletion successful
         return True
 
     """
-    # Insert a record with the specified columns
-    # Return True upon successful insertion
-    # Returns False if insert fails for any reason
+    # Insert a record with specified columns
+    # Return True upon succesful insertion
+    # Returns False if insert fails for whatever reason
     """
     def insert(self, *columns):
-        # Check if the primary key already exists
-        key_column = self.table.key
-        primary_key = columns[key_column]
-        
-        if self.table.index.locate(key_column, primary_key) is not None:
+
+        if (self.table.index.locate(self.table.key, columns[self.table.key])):
             return False
-        
-        # Create a new record
-        record = Record(0, primary_key, [0] * (self.table.total_num_columns))
-        
-        # Assign a RID to the record
+
+        # check for invalid number of columns
+        if len(columns) != self.table.num_columns:
+            return False
+  
+        record = Record(rid = None, key = self.table.key, columns = None)
         self.table.assign_rid_to_record(record)
-        
-        # Set the hidden columns
-        record.columns[RID_COLUMN] = record.rid
-        record.columns[INDIRECTION_COLUMN] = record.rid
-        record.columns[SCHEMA_ENCODING_COLUMN] = 0
-        
-        # Set the data columns
-        for i, value in enumerate(columns):
-            record.columns[i + NUM_HIDDEN_COLUMNS] = value
-        
-        # Insert the record into the table
+
+        hidden_columns = [None] * NUM_HIDDEN_COLUMNS
+        hidden_columns[INDIRECTION_COLUMN] = record.rid
+        hidden_columns[RID_COLUMN] = record.rid
+        hidden_columns[UPDATE_TIMESTAMP_COLUMN] = RECORD_NONE_VALUE
+        #hidden_columns[TIMESTAMP_COLUMN] = int(time())
+        hidden_columns[SCHEMA_ENCODING_COLUMN] = 0
+        #hidden_columns[BASE_PAGE_ID_COLUMN] = record.rid
+        record.columns = hidden_columns + list(columns)
+    
         self.table.insert_record(record)
-        
-        # Update the index
         self.table.index.insert_in_all_indices(record.columns)
-        
+
         return True
 
+    
     """
-    # Read a record with specified key
+    # Read matching record with specified search key
     # :param search_key: the value you want to search based on
     # :param search_key_index: the column index you want to search based on
     # :param projected_columns_index: what columns to return. array of 1 or 0 values.
@@ -91,56 +80,10 @@ class Query:
     """
     def select(self, search_key, search_key_index, projected_columns_index):
         # retrieve a list of RIDs that contain the "search_key" value within the column as defined by "search_key_index"
-        rids = self.table.index.locate(search_key_index, search_key)
-        
-        if not rids:
-            return []
-        
-        records = []
-        
-        for rid in rids:
-            # Get the record location
-            page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-            
-            if page_range_index >= len(self.table.page_ranges):
-                continue
-            
-            page_range = self.table.page_ranges[page_range_index]
-            
-            # Read the record columns
-            record_columns = [None] * (self.table.total_num_columns)
-            
-            # Read the indirection column to find the latest version
-            indirection_rid = page_range.bufferpool.read_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot)
-            
-            # If the indirection points to a tail record, read from there
-            if indirection_rid >= MAX_RECORD_PER_PAGE_RANGE:
-                # Read from tail record
-                for i in range(NUM_HIDDEN_COLUMNS):
-                    record_columns[i] = page_range.read_tail_record_column(indirection_rid, i)
-                
-                # Read data columns based on projected_columns_index
-                for i in range(self.table.num_columns):
-                    if projected_columns_index[i]:
-                        record_columns[i + NUM_HIDDEN_COLUMNS] = page_range.read_tail_record_column(indirection_rid, i + NUM_HIDDEN_COLUMNS)
-            else:
-                # Read from base record
-                for i in range(NUM_HIDDEN_COLUMNS):
-                    record_columns[i] = page_range.bufferpool.read_page_slot(page_range_index, i, page_index, page_slot)
-                
-                # Read data columns based on projected_columns_index
-                for i in range(self.table.num_columns):
-                    if projected_columns_index[i]:
-                        record_columns[i + NUM_HIDDEN_COLUMNS] = page_range.bufferpool.read_page_slot(page_range_index, i + NUM_HIDDEN_COLUMNS, page_index, page_slot)
-            
-            # Create a record object
-            record = Record(record_columns[RID_COLUMN], record_columns[NUM_HIDDEN_COLUMNS + self.table.key], record_columns)
-            records.append(record)
-        
-        return records
-
+        return self.select_version(search_key, search_key_index, projected_columns_index, 0)
+    
     """
-    # Read a record with specified key
+    # Read matching record with specified search key
     # :param search_key: the value you want to search based on
     # :param search_key_index: the column index you want to search based on
     # :param projected_columns_index: what columns to return. array of 1 or 0 values.
@@ -150,140 +93,144 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
-        # Get the RIDs for the search key
-        rids = self.table.index.locate(search_key_index, search_key)
+
+        rid_list = self.table.index.locate(search_key_index, search_key)
+        if not rid_list:
+            raise ValueError("No records found with the given key")
         
-        if not rids:
-            return []
-        
-        records = []
-        
-        for rid in rids:
-            # Get the record location
-            page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
+        record_objs = []
+
+        for rid in rid_list:
+            record_columns = [None] * self.table.num_columns
+            page_range_index, base_page_index, base_page_slot = self.table.get_base_record_location(rid)
             
-            if page_range_index >= len(self.table.page_ranges):
-                continue
-            
-            page_range = self.table.page_ranges[page_range_index]
-            
-            # Start with the base record's indirection
-            indirection_rid = page_range.bufferpool.read_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot)
-            
-            # Navigate to the desired version
-            current_version = 0
-            target_rid = indirection_rid
-            
-            # If we want an older version, traverse the indirection chain
-            while current_version < relative_version and target_rid >= MAX_RECORD_PER_PAGE_RANGE:
-                # Get the indirection of the current tail record
-                next_rid = page_range.read_tail_record_column(target_rid, INDIRECTION_COLUMN)
+            projected_columns_schema = 0
+            for i in range(len(projected_columns_index)):
+                if projected_columns_index[i] == 1:
+                    projected_columns_schema |= (1 << i)
+
+            if (projected_columns_schema >> self.table.key) & 1 == 1:
+                record_columns[self.table.key] = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + self.table.key, base_page_index, base_page_slot)
+                projected_columns_schema &= ~(1 << self.table.key)
+
+            base_schema = self.__readAndMarkSlot(page_range_index, SCHEMA_ENCODING_COLUMN, base_page_index, base_page_slot)
+            base_timestamp = self.__readAndMarkSlot(page_range_index, TIMESTAMP_COLUMN, base_page_index, base_page_slot)
+            current_tail_rid = self.__readAndMarkSlot(page_range_index, INDIRECTION_COLUMN, base_page_index, base_page_slot)
+
+            if current_tail_rid == rid:
                 
-                # If we've reached the base record, stop
-                if next_rid < MAX_RECORD_PER_PAGE_RANGE:
-                    break
-                
-                target_rid = next_rid
-                current_version += 1
-            
-            # If we couldn't find the requested version, skip this record
-            if current_version < relative_version:
-                continue
-            
-            # Read the record columns
-            record_columns = [None] * (self.table.total_num_columns)
-            
-            # If target_rid points to a tail record, read from there
-            if target_rid >= MAX_RECORD_PER_PAGE_RANGE:
-                # Read from tail record
-                for i in range(NUM_HIDDEN_COLUMNS):
-                    record_columns[i] = page_range.read_tail_record_column(target_rid, i)
-                
-                # Read data columns based on projected_columns_index
+                # Current RID = base RID, read all columns from the base page
                 for i in range(self.table.num_columns):
-                    if projected_columns_index[i]:
-                        record_columns[i + NUM_HIDDEN_COLUMNS] = page_range.read_tail_record_column(target_rid, i + NUM_HIDDEN_COLUMNS)
+                    if (projected_columns_schema >> i) & 1:
+                        record_columns[i] = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + i, base_page_index, base_page_slot)
+            
             else:
-                # Read from base record
-                for i in range(NUM_HIDDEN_COLUMNS):
-                    record_columns[i] = page_range.bufferpool.read_page_slot(page_range_index, i, page_index, page_slot)
+                current_version = 0
                 
-                # Read data columns based on projected_columns_index
                 for i in range(self.table.num_columns):
-                    if projected_columns_index[i]:
-                        record_columns[i + NUM_HIDDEN_COLUMNS] = page_range.bufferpool.read_page_slot(page_range_index, i + NUM_HIDDEN_COLUMNS, page_index, page_slot)
+                    if (projected_columns_schema >> i) & 1:
+                        if (base_schema >> i) & 1 == 0:
+                            record_columns[i] = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + i, base_page_index, base_page_slot)
+                            continue
+
+                        temp_tail_rid = current_tail_rid
+                        found_value = False
+                        
+                        while temp_tail_rid != rid and current_version <= relative_version:
+                            tail_schema = self.table.page_ranges[page_range_index].read_tail_record_column(temp_tail_rid, SCHEMA_ENCODING_COLUMN)
+                            tail_timestamp = self.table.page_ranges[page_range_index].read_tail_record_column(temp_tail_rid, TIMESTAMP_COLUMN)
+                            
+                            if (tail_schema >> i) & 1:
+
+                                # Tail_timestamp should be greater than the base_timestamp for current version
+                                if tail_timestamp >= base_timestamp:
+                                    
+                                    if relative_version == 0:
+                                        tail_page_index, tail_slot = self.table.page_ranges[page_range_index].get_column_location(temp_tail_rid, NUM_HIDDEN_COLUMNS + i)
+                                        record_columns[i] = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + i, tail_page_index, tail_slot)
+                                        found_value = True
+                                        break
+                                
+                                 # Reading from an older version of the record
+                                else:
+                                    current_version += 1
+
+                                    if current_version == relative_version:
+                                        tail_page_index, tail_slot = self.table.page_ranges[page_range_index].get_column_location(temp_tail_rid, NUM_HIDDEN_COLUMNS + i)
+                                        record_columns[i] = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + i, tail_page_index, tail_slot)
+                                        found_value = True
+                                        break
+
+                            temp_tail_rid = self.table.page_ranges[page_range_index].read_tail_record_column(temp_tail_rid, INDIRECTION_COLUMN)
+                        
+                        if not found_value:
+                            record_columns[i] = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + i, base_page_index, base_page_slot)
             
-            # Create a record object
-            record = Record(record_columns[RID_COLUMN], record_columns[NUM_HIDDEN_COLUMNS + self.table.key], record_columns)
-            records.append(record)
+            record_objs.append(Record(rid, record_columns[self.table.key], record_columns))
         
-        return records
+        return record_objs
+
 
     """
     # Update a record with specified key and columns
     # Returns True if update is succesful
-    # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
+    # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking (Ignore this for now)
     """
     def update(self, primary_key, *columns):
-        # Get the RIDs for the primary key
-        key_column = self.table.key
-        rids = self.table.index.locate(key_column, primary_key)
-        
-        if not rids:
+        rid_location = self.table.index.locate(self.table.key, primary_key)
+        if rid_location is None:
+            print("Update Error: Record does not exist")
             return False
         
-        # Get the first RID (should be only one for a primary key)
-        rid = next(iter(rids))
-        
-        # Get the record location
-        page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-        
-        if page_range_index >= len(self.table.page_ranges):
-            return False
-        
-        page_range = self.table.page_ranges[page_range_index]
-        
-        # Read the current record
-        base_record_columns = [None] * (self.table.total_num_columns)
-        
-        for i in range(self.table.total_num_columns):
-            base_record_columns[i] = page_range.bufferpool.read_page_slot(page_range_index, i, page_index, page_slot)
-        
-        # Create a new tail record
-        tail_record_columns = [None] * (self.table.total_num_columns)
-        
-        # Set the hidden columns
-        logical_rid = page_range.assign_logical_rid()
-        tail_record_columns[RID_COLUMN] = logical_rid
-        tail_record_columns[INDIRECTION_COLUMN] = base_record_columns[INDIRECTION_COLUMN]
-        
-        # Calculate schema encoding
+        new_columns = [None] * self.table.total_num_columns
         schema_encoding = 0
+        
         for i, value in enumerate(columns):
+
+            # If we're modifying the primary_key then this update should be stopped since we can't change the primary_key column
+            if i == self.table.key and value is not None:
+                if (self.table.index.locate(self.table.key, value) is not None):
+                    print("Update Error: Primary Key already exists")
+                    return False
+            
             if value is not None:
                 schema_encoding |= (1 << i)
-        
-        tail_record_columns[SCHEMA_ENCODING_COLUMN] = schema_encoding
-        
-        # Set the data columns
-        for i, value in enumerate(columns):
-            if value is not None:
-                tail_record_columns[i + NUM_HIDDEN_COLUMNS] = value
-            else:
-                tail_record_columns[i + NUM_HIDDEN_COLUMNS] = base_record_columns[i + NUM_HIDDEN_COLUMNS]
-        
-        # Update the base record's indirection to point to the new tail record
-        page_range.bufferpool.write_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot, logical_rid)
-        
-        # Write the tail record
-        update_success = self.table.update_record(rid, tail_record_columns)
-        
-        if update_success:
-            # Update the index
-            self.table.index.update_all_indices(primary_key, tail_record_columns)
-        
-        return update_success
+            
+            new_columns[NUM_HIDDEN_COLUMNS + i] = value
 
+        page_range_index, page_index, page_slot = self.table.get_base_record_location(rid_location[0])
+        
+        prev_tail_rid = self.table.bufferpool.read_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot)
+        base_schema = self.table.bufferpool.read_page_slot(page_range_index, SCHEMA_ENCODING_COLUMN, page_index, page_slot)
+        
+        updated_base_schema = base_schema | schema_encoding
+
+        new_columns[INDIRECTION_COLUMN] = prev_tail_rid
+        new_columns[SCHEMA_ENCODING_COLUMN] = schema_encoding
+        #new_columns[TIMESTAMP_COLUMN] = int(time())
+
+        new_record = Record(rid = self.table.page_ranges[page_range_index].assign_logical_rid(), key = primary_key, columns = new_columns)
+
+        new_columns[RID_COLUMN] = new_record.rid
+
+        self.table.update_record(rid_location[0], new_columns)
+        
+        self.table.bufferpool.write_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot, new_record.rid)
+        self.table.bufferpool.write_page_slot(page_range_index, SCHEMA_ENCODING_COLUMN, page_index, page_slot, updated_base_schema)
+
+        indirFrame_num = self.table.bufferpool.get_page_frame_num(page_range_index, INDIRECTION_COLUMN, page_index)
+        schemaFrame_num = self.table.bufferpool.get_page_frame_num(page_range_index, SCHEMA_ENCODING_COLUMN, page_index)
+        self.table.bufferpool.mark_frame_used(indirFrame_num)
+        self.table.bufferpool.mark_frame_used(schemaFrame_num)
+
+        # Update successful
+        self.table.index.update_all_indices(primary_key, new_columns)
+        # print("Update Successful\n")
+
+        return True
+
+
+    
     """
     :param start_range: int         # Start of the key range to aggregate 
     :param end_range: int           # End of the key range to aggregate 
@@ -293,40 +240,9 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        # Get the RIDs in the range
-        key_column = self.table.key
-        rids = self.table.index.locate_range(start_range, end_range, key_column)
-        
-        if not rids:
-            return False
-        
-        # Calculate the sum
-        column_sum = 0
-        
-        for rid in rids:
-            # Get the record location
-            page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-            
-            if page_range_index >= len(self.table.page_ranges):
-                continue
-            
-            page_range = self.table.page_ranges[page_range_index]
-            
-            # Read the indirection column to find the latest version
-            indirection_rid = page_range.bufferpool.read_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot)
-            
-            # If the indirection points to a tail record, read from there
-            if indirection_rid >= MAX_RECORD_PER_PAGE_RANGE:
-                # Read from tail record
-                value = page_range.read_tail_record_column(indirection_rid, aggregate_column_index + NUM_HIDDEN_COLUMNS)
-            else:
-                # Read from base record
-                value = page_range.bufferpool.read_page_slot(page_range_index, aggregate_column_index + NUM_HIDDEN_COLUMNS, page_index, page_slot)
-            
-            column_sum += value
-        
-        return column_sum
+        return self.sum_version(start_range, end_range, aggregate_column_index, 0)
 
+    
     """
     :param start_range: int         # Start of the key range to aggregate 
     :param end_range: int           # End of the key range to aggregate 
@@ -338,61 +254,75 @@ class Query:
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
         # Get all RIDs within the specified range
-        key_column = self.table.key
-        rids = self.table.index.locate_range(start_range, end_range, key_column)
+        records_list = self.table.index.locate_range(start_range, end_range, self.table.key)
         
-        if not rids:
+        if not records_list:
             return False
-        
-        # Calculate the sum
-        column_sum = 0
-        
-        for rid in rids:
-            # Get the record location
-            page_range_index, page_index, page_slot = self.table.get_base_record_location(rid)
-            
-            if page_range_index >= len(self.table.page_ranges):
-                continue
-            
-            page_range = self.table.page_ranges[page_range_index]
-            
-            # Start with the base record's indirection
-            indirection_rid = page_range.bufferpool.read_page_slot(page_range_index, INDIRECTION_COLUMN, page_index, page_slot)
-            
-            # Navigate to the desired version
-            current_version = 0
-            target_rid = indirection_rid
-            
-            # If we want an older version, traverse the indirection chain
-            while current_version < relative_version and target_rid >= MAX_RECORD_PER_PAGE_RANGE:
-                # Get the indirection of the current tail record
-                next_rid = page_range.read_tail_record_column(target_rid, INDIRECTION_COLUMN)
-                
-                # If we've reached the base record, stop
-                if next_rid < MAX_RECORD_PER_PAGE_RANGE:
-                    break
-                
-                target_rid = next_rid
-                current_version += 1
-            
-            # If we couldn't find the requested version, skip this record
-            if current_version < relative_version:
-                continue
-            
-            # Read the value from the appropriate record
-            if target_rid >= MAX_RECORD_PER_PAGE_RANGE:
-                # Read from tail record
-                value = page_range.read_tail_record_column(target_rid, aggregate_column_index + NUM_HIDDEN_COLUMNS)
-            else:
-                # Read from base record
-                value = page_range.bufferpool.read_page_slot(page_range_index, aggregate_column_index + NUM_HIDDEN_COLUMNS, page_index, page_slot)
-            
-            column_sum += value
-        
-        return column_sum
 
+        sum_total = 0
+        for rid in records_list:
+            page_range_index, base_page_index, base_page_slot = self.table.get_base_record_location(rid)
+
+            # Step 3: Get Base Record Details
+            base_schema = self.__readAndMarkSlot(page_range_index, SCHEMA_ENCODING_COLUMN, base_page_index, base_page_slot)
+            base_timestamp = self.__readAndMarkSlot(page_range_index, TIMESTAMP_COLUMN, base_page_index, base_page_slot)
+            
+            # Get the current tail RID from the base record
+            current_tail_rid = self.__readAndMarkSlot(page_range_index, INDIRECTION_COLUMN, base_page_index, base_page_slot)
+
+            # Step 4: Check if the RID points to the base record
+            if current_tail_rid == (rid % MAX_RECORD_PER_PAGE_RANGE):
+                # Base RID, read directly from the base page
+                aggregate_value = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + aggregate_column_index, base_page_index, base_page_slot)
+                sum_total += aggregate_value
+                continue
+            
+            # Traverse Tail Records by Version
+            current_version = 0
+            found_value = False
+            
+            current_version_rid = current_tail_rid
+            while current_version_rid != (rid % MAX_RECORD_PER_PAGE_RANGE) and current_version <= relative_version:
+                # Read schema and timestamp from the tail record
+                tail_schema = self.table.page_ranges[page_range_index].read_tail_record_column(current_version_rid, SCHEMA_ENCODING_COLUMN)
+                tail_timestamp = self.table.page_ranges[page_range_index].read_tail_record_column(current_version_rid, TIMESTAMP_COLUMN)
+
+                # Check if the column was updated in this version
+                if (tail_schema >> aggregate_column_index) & 1:
+                    
+                    # Tail_timestamp should be greater than the base_timestamp for current version
+                    if tail_timestamp >= base_timestamp:
+                        # If looking for the latest version
+                        if relative_version == 0:
+                            tail_page_index, tail_slot = self.table.page_ranges[page_range_index].get_column_location(current_version_rid, NUM_HIDDEN_COLUMNS + aggregate_column_index)
+                            aggregate_value = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + aggregate_column_index, tail_page_index, tail_slot)
+                            sum_total += aggregate_value
+                            found_value = True
+                            break
+
+                    # Reading from an older version of the record
+                    else:
+                        current_version += 1
+                        if current_version == relative_version:
+                            tail_page_index, tail_slot = self.table.page_ranges[page_range_index].get_column_location(current_version_rid, NUM_HIDDEN_COLUMNS + aggregate_column_index)
+                            aggregate_value = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + aggregate_column_index, tail_page_index, tail_slot)
+                            sum_total += aggregate_value
+                            found_value = True
+                            break
+
+                # Move to the previous version
+                current_version_rid = self.table.page_ranges[page_range_index].read_tail_record_column(current_version_rid, INDIRECTION_COLUMN)
+
+            # If no value found in tail records, read from base page
+            if not found_value:
+                aggregate_value = self.__readAndMarkSlot(page_range_index, NUM_HIDDEN_COLUMNS + aggregate_column_index, base_page_index, base_page_slot)
+                sum_total += aggregate_value
+
+        return sum_total
+
+    
     """
-    incremenets one column of the record
+    Increments one column of the record
     this implementation should work if your select and update queries already work
     :param key: the primary of key of the record to increment
     :param column: the column to increment
@@ -407,19 +337,17 @@ class Query:
             u = self.update(key, *updated_columns)
             return u
         return False
+    
 
     def __readAndMarkSlot(self, page_range_index, column, page_index, page_slot):
-        '''Reads a slot from a page and marks the frame as used'''
         value = self.table.bufferpool.read_page_slot(page_range_index, column, page_index, page_slot)
         frame_num = self.table.bufferpool.get_page_frame_num(page_range_index, column, page_index)
-        if frame_num is not None:
-            self.frames_used.append(frame_num)
-        return value
+        self.table.bufferpool.mark_frame_used(frame_num)
 
+        return value
+    
     def __readAndTrack(self, page_range_index, column, page_index, slot, frames_used):
-        '''Reads a slot from a page and tracks the frame used'''
         value = self.table.bufferpool.read_page_slot(page_range_index, column, page_index, slot)
         frame_num = self.table.bufferpool.get_page_frame_num(page_range_index, column, page_index)
-        if frame_num is not None:
-            frames_used.append(frame_num)
+        frames_used.put(frame_num)
         return value

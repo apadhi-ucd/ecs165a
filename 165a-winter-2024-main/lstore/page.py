@@ -4,21 +4,13 @@ import base64
 import zlib
 
 class Page:
-
     def __init__(self):
-        self.num_records = 0                    
-        self.data = bytearray(PAGE_SIZE) 
+        self.num_records = 0
+        self.data = bytearray(PAGE_SIZE)
 
-    """
-    Returns true if the page has capacity to store another record
-    """
     def has_capacity(self):
         return self.num_records < MAX_RECORD_PER_PAGE
 
-    """
-    Writes an integer value to the page
-    :param value: int - Integer value to write
-    """
     def write(self, value):
         struct.pack_into("i", self.data, self.num_records * INTEGER_BYTE_SIZE, value)
         self.num_records += 1
@@ -32,12 +24,8 @@ class Page:
         struct.pack_into("i", self.data, index * INTEGER_BYTE_SIZE, value)
 
     def get(self, index):
-        '''This function should be able to grab a data located at a certain index in the page'''
+        '''This funciton should be able to grab a data located at a certain index in the page'''
         return struct.unpack_from("i", self.data, index * INTEGER_BYTE_SIZE)[0]
-    
-    def read(self, index):
-        '''Alias for get() to maintain compatibility with existing code'''
-        return self.get(index)
     
     def serialize(self):
         '''Returns page metadata as a JSON-compatible dictionary'''

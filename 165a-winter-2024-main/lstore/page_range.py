@@ -1,6 +1,5 @@
 import threading
 from lstore.config import *
-from lstore.page import Page
 from lstore.bufferpool import BufferPool
 import json
 from typing import Type
@@ -41,16 +40,6 @@ class PageRange:
         '''setup queue for logical rid allocation'''
         self.allocation_logical_rid_queue = queue.Queue()
 
-        # Initialize base pages for backward compatibility
-        self.base_pages = []
-        self.tail_pages = []
-        self.num_base_records = 0
-        self.num_tail_records = 0
-        
-        for _ in range(num_columns + METADATA_COLUMNS):
-            self.base_pages.append([Page()])
-            self.tail_pages.append([Page()])
-
     def write_base_record(self, page_index, page_slot, columns) -> bool:
         columns[INDIRECTION_COLUMN] = self.__normalize_rid(columns[RID_COLUMN])
         for (i, column) in enumerate(columns):
@@ -69,8 +58,7 @@ class PageRange:
         # mark the frame used after reading
         for i in range(self.total_num_columns):
             frame_num = self.bufferpool.get_page_frame_num(self.page_range_index, i, page_index)
-            if frame_num is not None:
-                self.bufferpool.mark_frame_used(frame_num)
+            self.bufferpool.mark_frame_used(frame_num)
 
         return base_record_columns
     
@@ -97,7 +85,7 @@ class PageRange:
                 continue
             
             # If current tail page doesn't have capacity move to the next tail page
-            has_capacity = self.bufferpool.get_page_has_capacity(self.page_range_index, i, self.tail_page_index[i])
+            has_capacity =  self.bufferpool.get_page_has_capacity(self.page_range_index, i, self.tail_page_index[i])
 
             if not has_capacity:
                 self.tail_page_index[i] += 1
@@ -120,8 +108,7 @@ class PageRange:
         page_index, page_slot = self.get_column_location(logical_rid, column)
         column_value = self.bufferpool.read_page_slot(self.page_range_index, column, page_index, page_slot)
         frame_num = self.bufferpool.get_page_frame_num(self.page_range_index, column, page_index)
-        if frame_num is not None:
-            self.bufferpool.mark_frame_used(frame_num)
+        self.bufferpool.mark_frame_used(frame_num)
         return column_value
     
     # Only use this function for API calls
@@ -161,103 +148,21 @@ class PageRange:
             self.logical_rid_index += 1
             return self.logical_rid_index - 1
     
-    # For backward compatibility with existing code
-    def has_page_capacity(self, is_base):
-        """Returns true if the page range can store another record"""
-        pages = self.base_pages if is_base else self.tail_pages
-        return pages[0][-1].has_capacity()
-    
-    def add_page(self, is_base):
-        """Adds a new page for each column when current ones are full"""
-        pages = self.base_pages if is_base else self.tail_pages
-        for column in pages:
-            column.append(Page())
-    
-    def write_record(self, record, is_base):
-        """Write a record to the page"""
-        if len(record) != self.total_num_columns:
-            print("Unexpected value in write_record")
-            return
-        
-        # Write record to page
-        pages = self.base_pages if is_base else self.tail_pages
-        if not self.has_page_capacity(is_base):
-            self.add_page(is_base)
-            
-        page_index = len(pages[0]) - 1
-        slot = pages[0][page_index].num_records
-        
-        # Write metadata
-        for i, value in enumerate(record):
-            pages[i][page_index].write(value)
-            
-        # Update metadata
-        if is_base:
-            self.num_base_records += 1
-        else:
-            self.num_tail_records += 1
-        return (page_index, slot)
-    
-    def read_record(self, page_index, slot, projected_columns_index, is_base):
-        """Read a record from the page"""
-        pages = self.base_pages if is_base else self.tail_pages
-        # Check if the index is valid
-        if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
-            print("Invalid index")
-            return None
-            
-        record = []
-
-        # Read metadata
-        for i in range(METADATA_COLUMNS):
-            record.append(pages[i][page_index].read(slot))
-            
-        # Read data
-        for i in range(self.total_num_columns - METADATA_COLUMNS):
-            if projected_columns_index[i]:
-                value = pages[i + METADATA_COLUMNS][page_index].read(slot)
-                record.append(value)
-            else:
-                record.append(None)
-                
-        return record
-    
-    def update_record_column(self, page_index, slot, column, value, is_base):
-        """Update a record in the page"""
-        pages = self.base_pages if is_base else self.tail_pages
-        # Check if the index is valid
-        if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
-            print("Invalid index")
-            return
-        
-        # Update metadata
-        if column < 0 or column >= self.total_num_columns:
-            print("Invalid column")
-            return
-            
-        # Update data
-        page = pages[column][page_index]
-        page.write_precise(slot, value)
-    
     def serialize(self):
         '''Returns page metadata as a JSON-compatible dictionary'''
         return {
             "logical_directory": self.logical_directory,
             "tail_page_index": self.tail_page_index,
             "logical_rid_index": self.logical_rid_index,
-            "tps": self.tps,
-            "num_base_records": self.num_base_records,
-            "num_tail_records": self.num_tail_records
+            "tps": self.tps
         }
     
     def deserialize(self, json_data):
         '''Loads a page from serialized data'''
-        self.logical_directory = {int(k): v for k, v in json_data.get("logical_directory", {}).items()}
-        self.tail_page_index = json_data.get("tail_page_index", [MAX_PAGE_RANGE] * self.total_num_columns)
-        self.logical_rid_index = json_data.get("logical_rid_index", MAX_RECORD_PER_PAGE_RANGE)
-        self.tps = json_data.get("tps", 0)
-        self.num_base_records = json_data.get("num_base_records", 0)
-        self.num_tail_records = json_data.get("num_tail_records", 0)
+        self.logical_directory = {int(k): v for k, v in json_data["logical_directory"].items()}
+        self.tail_page_index = json_data["tail_page_index"]
+        self.logical_rid_index = json_data["logical_rid_index"]
+        self.tps = json_data["tps"]
 
     def __hash__(self):
         return self.page_range_index
@@ -270,5 +175,6 @@ class PageRange:
 
     def __repr__(self):
         return json.dumps(self.serialize())
-
     
+    
+
