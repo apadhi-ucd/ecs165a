@@ -2,6 +2,8 @@ from lstore.table import Table, Record
 from lstore.index import Index
 from lstore.lock import LockManager
 from lstore.config import *
+from lstore.query import Query
+from lstore.transaction_log import TransactionLog
 
 class Transaction:
     """
@@ -10,12 +12,14 @@ class Transaction:
     with proper locking, logging, and rollback capabilities.
     """
     
-    def __init__(self):
+    def __init__(self, lock_manager=None):
         """
         Initialize a new transaction with empty query list and log.
         """
         self.queries = []  # List of (query_function, table, args) tuples
         self.log = []      # List of log entries for rollback operations
+        self.log_manager = TransactionLog()
+        self.undo_log = []
     
     '''
     Purpose: Adds a query operation to the transaction
@@ -26,8 +30,8 @@ class Transaction:
         - Doesn't execute the query immediately, just queues it for later execution
         - Allows building up a multi-operation transaction before committing
     '''
-    def add_query(self, operation, data_table, *operation_params):
-        self.queries.append((operation, data_table, operation_params))
+    def add_query(self, query_func, target_table, *query_args):
+        self.queries.append((query_func, target_table, query_args))
     
     '''
     Purpose: Finalizes a successful transaction by releasing all locks and clearing the log
@@ -38,14 +42,13 @@ class Transaction:
         - Returns True to indicate successful commit
     '''
     def commit(self):
-        transaction_identifier = id(self)
+        tx_id = id(self)
 
-        # Release all locks (lock_manager is shared globally)
-        if self.queries:
-            self.queries[0][1].lock_manager.release_all_locks(transaction_identifier)
-        
-        # Clear the log after successful commit
-        self.log.clear()
+        # release_all_locks called on one table since lock_manager is shared globally
+        self.queries[0][1].lock_manager.release_all_locks(tx_id)
+        self.undo_log.clear()
+        # TBD, persist the log to disk here.
+
         return True
     
     '''
@@ -65,44 +68,66 @@ class Transaction:
         - Returns False to indicate transaction abort
     '''
     def abort(self):
-        print("Aborting transaction")
+        '''Rolls back the transaction and releases all locks'''
 
-        # Process logs in reverse order (newest first)
-        for journal_entry in reversed(self.log):
-            query_name = journal_entry["query"]
-            db_table = journal_entry["table"]
-            cmd_args = journal_entry["args"]
-            modifications = journal_entry["changes"]
-            primary_key = cmd_args[0]
+        # reverse logs to process latest first
+        for log_item in reversed(self.undo_log):
 
-            # Undo insert operations
-            if query_name == "insert":
-                row_id = modifications["rid"]
-                # Soft delete the record
-                db_table.deallocation_base_rid_queue.put(row_id)
-                db_table.index.delete_from_all_indices(primary_key)
-                db_table.index.delete_logged_columns()
+            operation_type = log_item["query"]
+            target_table = log_item["table"]
+            operation_args = log_item["args"]
+            operation_changes = log_item["changes"]
             
-            # Undo delete operations
-            elif query_name == "delete":
-                previous_data = modifications["prev_columns"]
-                row_id = modifications["rid"]
-                # Recreate and reinsert the deleted record
-                new_record = Record(row_id, primary_key, previous_data)
-                db_table.insert_record(new_record)
-                db_table.index.clear_logged_columns()
-            
-            # Undo update operations
-            elif query_name == "update":
-                previous_data = modifications["prev_columns"]
-                db_table.index.delete_from_all_indices(previous_data[db_table.key], previous_data)
-                db_table.index.delete_logged_columns()
+            key_value = operation_args[0]
+
+
+            if operation_type == "insert":
+                # undo insert - remove inserted record from storage and indexes
+                try:
+                    # For an insert, rollback by deleting the inserted record.
+                    record_id = operation_changes["rid"]
+                    # soft delete
+                    target_table.deallocation_base_rid_queue.put(record_id)
+                    target_table.index.delete_from_all_indices(key_value)
+                    target_table.index.delete_logged_columns()
+                except Exception as error:
+                    print(f"Error rolling back insert for RID {record_id}: {error}")
+ 
+            elif operation_type == "delete":
+                # undo delete - insert values into indexes
+
+                try:
+                    # For a delete, rollback by re-inserting the deleted record.                    
+                    original_columns = operation_changes["prev_columns"]
+                    record_id = operation_changes["rid"]
+
+                    # create new record object based on logged values
+                    new_record = Record(record_id, key_value, original_columns)
+
+                    # insert record and restore indexes
+                    target_table.insert_record(new_record)
+                    #target_table.index.clear_logged_columns()
+                    target_table.index.insert_in_all_indices(new_record.columns)
+                except Exception as error:
+                    print(f"Error rolling back delete for RID {record_id}: {error}")
+                
+            elif operation_type == "update":
+                # undo update - restore previous column values
+                try:
+                    # For an update, rollback by restoring the previous state.
+                    current_columns = operation_changes["prev_columns"]  #new columns now when reversed
+                    previous_columns = operation_changes["columns"]  #prev columns now
+                    target_table.index.delete_from_all_indices(current_columns[target_table.key], current_columns)
+                    target_table.index.delete_logged_columns()
+                    #target_table.index.update_all_indices(current_columns[target_table.key], current_columns, previous_columns)
+                    target_table.update_record(record_id, current_columns)
+                    target_table.index.update_all_indices(key_value, current_columns, previous_columns)
+                except Exception as error:
+                    print(f"Error rolling back update for RID {record_id}: {error}")
         
-        # Release all locks
-        transaction_identifier = id(self)
-        if self.queries and self.queries[0][1].lock_manager.transaction_states.get(transaction_identifier):
-            self.queries[0][1].lock_manager.release_all_locks(transaction_identifier)
-        
+        tx_id = id(self)
+        if self.queries and self.queries[0][1].lock_manager.transaction_states.get(tx_id):
+            self.queries[0][1].lock_manager.release_all_locks(tx_id)
         return False
     
     """
@@ -114,17 +139,17 @@ class Transaction:
         - Returns a tuple containing primary key and table key for the record
         - For different query types, extracts the relevant identifiers from different argument positions
     """
-    def __query_unique_identifier(self, operation, data_table, operation_params):
-        if operation.__name__ in ["delete", "update"]:
-            return (operation_params[0], data_table.key)
-        elif operation.__name__ == "insert":
-            return (operation_params[data_table.key], data_table.key)
-        elif operation.__name__ in ["select", "select_version"]:
-            return (operation_params[0], operation_params[1])
-        elif operation.__name__ in ["sum", "sum_version"]:
-            return operation_params[3]
+    def __query_unique_identifier(self, query_func, target_table, query_args):
+        if (query_func.__name__ in ["delete", "update"]):
+            return (query_args[0], target_table.key)
+        elif (query_func.__name__ == "insert"):
+            return (query_args[target_table.key], target_table.key)
+        elif (query_func.__name__ in ["select", "select_version"]):
+            return (query_args[0], query_args[1])
+        elif (query_func.__name__ in ["sum", "sum_version"]):
+            return query_args[3]
         else:
-            raise ValueError(f"Query {operation.__name__} not supported")
+            raise ValueError(f"Query {query_func.__name__} not supported")
     
     '''
     Purpose: Executes all queries in the transaction while ensuring ACID properties
@@ -148,65 +173,73 @@ class Transaction:
         - Calls the commit method to finalize the transaction and release all locks
     '''
     def run(self):
-        transaction_identifier = id(self)
-        lock_registry = {}
-        table_registry = {}
+        '''Acquires intention/record locks and handles logging'''
+        tx_id = id(self)
+        record_locks = {}
+        table_locks = {}
 
-        # Phase 1: Acquire all necessary locks
-        for operation, data_table, operation_params in self.queries:
-            resource_id = self.__query_unique_identifier(operation, data_table, operation_params)
+        for query_func, target_table, query_args in self.queries:
+            # set table and record lock types
+            record_key = self.__query_unique_identifier(query_func, target_table, query_args)
 
-            if resource_id not in lock_registry:
-                # For read operations (select, sum)
-                if operation.__name__ in ["select", "select_version", "sum", "sum_version"]:
-                    lock_registry[resource_id] = "S"  # Shared lock
-                    table_registry[resource_id] = "IS"  # Intention Shared lock
+            if record_key not in record_locks:
+                if (query_func.__name__ in ["select", "select_version", "sum", "sum_version"]):
+                    record_locks[record_key] = "S"
+                    table_locks[record_key] = "IS"
                     try:
-                        data_table.lock_manager.acquire_lock(transaction_identifier, resource_id, "S")
-                        data_table.lock_manager.acquire_lock(transaction_identifier, data_table.name, "IS")
-                    except Exception as lock_error:
-                        print("Failed to acquire shared lock: ", lock_error)
+                        target_table.lock_manager.acquire_lock(tx_id, record_key, "S")
+                        target_table.lock_manager.acquire_lock(tx_id, target_table.name, "IS")
+                    except Exception as error:
+                        print("Failed to aquire shared lock: ", error)
                         return self.abort()
-                
-                # For write operations (insert, update, delete)
+                    
                 else:
-                    lock_registry[resource_id] = "X"  # Exclusive lock
-                    table_registry[resource_id] = "IX"  # Intention Exclusive lock
+                    record_locks[record_key] = "X"
+                    table_locks[record_key] = "IX"
                     try:
-                        data_table.lock_manager.acquire_lock(transaction_identifier, resource_id, "X")
-                        data_table.lock_manager.acquire_lock(transaction_identifier, data_table.name, "IX")
-                    except Exception as lock_error:
-                        print("Failed to acquire exclusive lock: ", lock_error)
+                        target_table.lock_manager.acquire_lock(tx_id, record_key, "X")
+                        target_table.lock_manager.acquire_lock(tx_id, target_table.name, "IX")
+                    except Exception as error:
+                        print("Failed to aquire exclusive lock: ", error)
                         return self.abort()
-            
-            # Upgrade lock if needed (read → write)
-            elif lock_registry[resource_id] == "S" and operation.__name__ in ["update", "delete", "insert"]:
-                lock_registry[resource_id] = "X"
-                table_registry[resource_id] = "IX"
+                    
+            elif (record_locks[record_key] == "S" and query_func.__name__ in ["update", "delete", "insert"]):
+                record_locks[record_key] = "X"
+                table_locks[record_key] = "IX"
                 try:
-                    data_table.lock_manager.upgrade_lock(transaction_identifier, resource_id, "S", "X")
-                    data_table.lock_manager.upgrade_lock(transaction_identifier, data_table.name, "IS", "IX")
-                except Exception as lock_error:
-                    print("Failed to upgrade lock: ", lock_error)
+                    target_table.lock_manager.upgrade_lock(tx_id, record_key, "S", "X")
+                    target_table.lock_manager.upgrade_lock(tx_id, target_table.name, "IS", "IX")
+                except Exception as error:
+                    print("Failed to upgrade lock: ", error)
                     return self.abort()
 
-        # Phase 2: Execute queries and log changes
-        for operation, data_table, operation_params in self.queries:
-            # Create log entry for potential rollback
-            journal_entry = {"query": operation.__name__, "table": data_table, "args": operation_params, "changes": []}
+        # execute queries and handle logging
+        for query_func, target_table, query_args in self.queries:
 
-            # Execute query with appropriate parameters
-            if operation.__name__ in ["insert", "update", "delete"]:
-                execution_result = operation(*operation_params, log_entry=journal_entry)
-            else:  # select or sum operations
-                execution_result = operation(*operation_params) 
+            # create log dictionary to store changes made during a given transaction
+            operation_log = {"query": query_func.__name__, "table": target_table, "args": query_args, "changes": []}
+
+            # pass operation_log into query only if insert, update, or delete
+            if query_func.__name__ in ["insert", "update", "delete"]:
+                query_result = query_func(*query_args, log_entry=operation_log)
+
+            elif query_func.__name__ in ["select", "select_version", "sum", "sum_version"]:
+                query_result = query_func(*query_args) 
             
-            # Abort if query failed
-            if execution_result == False:
+            # If the query has failed the transaction should abort
+            if query_result == False:
                 return self.abort()
             
-            # Log successful operation
-            self.log.append(journal_entry)
+            # Record the log entry locally for potential rollback and in the log manager 
+            self.undo_log.append(operation_log)
+            
+            # Record the log entry locally and in the persistent log manager for recovery
+            self.undo_log.append(operation_log)
+            operation_type = operation_log.get("query")
+            record_id = operation_log.get("rid")
+            previous_state = operation_log.get("prev_columns")
+            new_state = operation_log.get("columns")
+            self.log_manager.log_operation(tx_id, operation_type, record_id, previous_state, new_state)
+            
 
-        # Phase 3: Commit the transaction
         return self.commit()
