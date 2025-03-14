@@ -5,6 +5,7 @@ import shutil
 from lstore.table import Table
 from lstore.index import Index
 from BTrees.OOBTree import OOBTree
+from lstore.lock import LockManager
 
 class Database():
 
@@ -13,6 +14,7 @@ class Database():
         self.path = path
         self.no_path_set = True
         atexit.register(self.__cleanup_db_directory)
+        self.lock = Lock_Manager()
     
     """
     # Fetches an existing table from the database
@@ -33,7 +35,7 @@ class Database():
         if self.tables.get(name) is not None:
             raise NameError(f"Cannot create table! A table with this name already exists: {name}")
 
-        self.tables[name] = Table(name, num_columns, key_index, self.path)
+        self.tables[name] = Table(name, num_columns, key_index, self.path, self.lock)
         return self.tables[name]
     
     """
@@ -65,7 +67,7 @@ class Database():
 
                 # reconstruct each table from stored configuration
                 for tbl_name, tbl_config in stored_tables_data.items():
-                    tbl_instance = Table(tbl_name, tbl_config["num_columns"], tbl_config["key_index"], self.path)
+                    tbl_instance = Table(tbl_name, tbl_config["num_columns"], tbl_config["key_index"], self.path, self.lock)
                     self.tables[tbl_name] = tbl_instance
 
                     # populate table with stored metadata
