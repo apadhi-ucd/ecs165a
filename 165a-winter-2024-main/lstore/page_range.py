@@ -1,118 +1,186 @@
-from lstore.page import Page    
-import lstore.config as config
+import threading
+from lstore.config import *
+from lstore.bufferpool import BufferPool
+import json
+from typing import Type
+import queue
+
+class MergeRequest:
+    '''Stores metadata about tail pages scheduled for merging operations'''
+    def __init__(self, page_range_index, turn_off=False):
+        self.turn_off = turn_off
+        self.page_range_index = page_range_index
 
 class PageRange:
+    '''
+    PageRange maintains column data for records
+    Base page indirection column points to corresponding tail record via logical_rid
+    '''
 
-    def __init__(self, num_columns):
-        self.num_columns = num_columns
-        self.base_pages = []                # List of base pages for each column
-        self.tail_pages = []                # List of tail pages for each column
-        self.num_tail_records = 0           # Number of tail records
-        self.num_base_records = 0           # Number of base records
+    def __init__(self, page_range_index, num_columns, bufferpool:BufferPool):
+        self.bufferpool = bufferpool
+        self.page_range_index = page_range_index
+        self.page_range_lock = threading.Lock()
         
-        # Initialize pages for each column
-        for _ in range(num_columns + config.METADATA_COLUMNS):
-            self.base_pages.append([Page()])
-            self.tail_pages.append([Page()])
-
-    """
-    Return either base or tail pages based on flag
-    :param is_base: bool - True for base pages, False for tail pages
-    """
-    def _get_pages(self, is_base):
-        return self.base_pages if is_base else self.tail_pages
-
-    """
-    Returns true if the page range can store another record
-    :param is_base: bool - True for base pages, False for tail pages
-    """
-    def has_page_capacity(self, is_base):
-        pages = self._get_pages(is_base)
-        return pages[0][-1].has_capacity()
-
-    """
-    Adds a new page for each column when current ones are full
-    :param is_base: bool - True for base pages, False for tail pages
-    """
-    def add_page(self, is_base):
-        pages = self._get_pages(is_base)
-        for column in pages:
-            column.append(Page())
-
-    """
-    Write a record to the page 
-    :param is_base: bool - True for base pages, False for tail pages
-    """
-    def write_record(self, record, is_base):
-        if len(record) != self.num_columns + config.METADATA_COLUMNS:
-            print("Unexpected value in write_record")
-            return
+        # Mapping between logical rids and physical storage locations
+        self.logical_directory = {}
         
-        # Write record to page
-        pages = self._get_pages(is_base)
-        if not self.has_page_capacity(is_base):
-            self.add_page(is_base)
-            
-        page_index = len(pages[0]) - 1
-        slot = pages[0][page_index].num_records
+        # Counter for assigning logical rids to record updates
+        self.logical_rid_index = MAX_RECORD_PER_PAGE_RANGE
         
-        # Write metadata
-        for i, value in enumerate(record):
-            pages[i][page_index].write(value)
-            
-        # Update metadata
-        if is_base:
-            self.num_base_records += 1
+        # Total columns including metadata columns
+        self.total_num_columns = num_columns + NUM_HIDDEN_COLUMNS
+        
+        # Current tail page index for each column
+        self.tail_page_index = [MAX_PAGE_RANGE] * self.total_num_columns
+        
+        # Tail page sequence counter
+        self.tps = 0
+        
+        # Queue for recycling logical rids
+        self.allocation_logical_rid_queue = queue.Queue()
+
+    def __normalize_rid(self, rid) -> int:
+        '''Normalizes a record ID to fit within page range boundaries'''
+        return rid % MAX_RECORD_PER_PAGE_RANGE
+
+    def __get_hidden_column_location(self, logical_rid) -> tuple[int, int]:
+        '''Calculates physical location for metadata columns given a logical rid'''
+        pg_idx = logical_rid // MAX_RECORD_PER_PAGE
+        pg_pos = logical_rid % MAX_RECORD_PER_PAGE
+        return pg_idx, pg_pos
+    
+    def __get_known_column_location(self, logical_rid, column) -> tuple[int, int]:
+        '''Retrieves physical location for data columns from logical directory'''
+        phys_location = self.logical_directory[logical_rid][column - NUM_HIDDEN_COLUMNS]
+        pg_idx = phys_location // MAX_RECORD_PER_PAGE
+        pg_pos = phys_location % MAX_RECORD_PER_PAGE
+        return pg_idx, pg_pos
+    
+    # API methods
+    
+    def get_column_location(self, logical_rid, column) -> tuple[int, int]:
+        '''Determines physical storage location for a column based on logical rid'''
+        if (column < NUM_HIDDEN_COLUMNS):
+            return self.__get_hidden_column_location(logical_rid)
         else:
-            self.num_tail_records += 1
-        return (page_index, slot)
+            return self.__get_known_column_location(logical_rid, column)
+    
+    def has_capacity(self, rid) -> bool:
+        '''Checks if base pages can accommodate the given record ID'''
+        return rid < (self.page_range_index * MAX_PAGE_RANGE * MAX_RECORD_PER_PAGE) 
 
-    """
-    Read a record from the page 
-    :param is_base: bool - True for base pages, False for tail pages
-    """
-    def read_record(self, page_index, slot, projected_columns_index, is_base):
-        pages = self._get_pages(is_base)
-        # Check if the index is valid
-        if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
-            print("Invalid index")
-            return
-            
-        record = []
+    def assign_logical_rid(self) -> int:
+        '''Allocates a logical rid either from recycled queue or by incrementing counter'''
+        if not self.allocation_logical_rid_queue.empty():
+            return self.allocation_logical_rid_queue.get()
+        else:
+            self.logical_rid_index += 1
+            return self.logical_rid_index - 1
+    
+    def write_base_record(self, page_index, page_slot, columns) -> bool:
+        '''Stores a new record in base pages and updates sequence counter'''
+        columns[INDIRECTION_COLUMN] = self.__normalize_rid(columns[RID_COLUMN])
+        for (col_idx, col_val) in enumerate(columns):
+            self.bufferpool.write_page_slot(self.page_range_index, col_idx, page_index, page_slot, col_val)
+        with self.page_range_lock:
+            self.tps += 1
+        return True
+    
+    def write_tail_record(self, logical_rid, *columns) -> bool:
+        '''Appends update record to tail pages and updates directory mapping'''
 
-        # Read metadata
-        for i in range(config.METADATA_COLUMNS):
-            record.append(pages[i][page_index].read(slot))
+        self.logical_directory[logical_rid] = [None] * (self.total_num_columns - NUM_HIDDEN_COLUMNS)
+
+        for (col_idx, col_val) in enumerate(columns):
+            if (col_val is None):
+                continue
             
-        # Read data
-        for i in range(self.num_columns):
-            if projected_columns_index[i]:
-                value = pages[i + config.METADATA_COLUMNS][page_index].read(slot)
-                record.append(value)
-            else:
-                record.append(None)
+            # Check if current tail page has space available
+            space_available = self.bufferpool.get_page_has_capacity(self.page_range_index, col_idx, self.tail_page_index[col_idx])
+
+            if not space_available:
+                self.tail_page_index[col_idx] += 1
+
+            elif space_available is None:
+                return False
                 
-        return record
-    """
-    Update a record in the page
-    :param is_base: bool - True for base pages, False for tail pages
-    """
-    def update_record_column(self, page_index, slot, column, value, is_base):
-        pages = self._get_pages(is_base)
-        # Check if the index is valid
-        if page_index >= len(pages[0]) or slot >= pages[0][page_index].num_records:
-            print("Invalid index")
-            return
-        
-        # Update metadata
-        if column < 0 or column >= self.num_columns + config.METADATA_COLUMNS:
-            print("Invalid column")
-            return
-            
-        # Update data
-        page = pages[column][page_index]
-        old_value = page.read(slot)
-        if old_value is not None:
-            page.data[slot * 8:(slot + 1) * 8] = value.to_bytes(8, byteorder='big', signed=True)
+            slot_position = self.bufferpool.write_page_next(self.page_range_index, col_idx, self.tail_page_index[col_idx], col_val)
 
+            # Only map non-metadata columns in the directory
+            if (col_idx >= NUM_HIDDEN_COLUMNS):
+                self.logical_directory[logical_rid][col_idx - NUM_HIDDEN_COLUMNS] = (self.tail_page_index[col_idx] * MAX_RECORD_PER_PAGE) + slot_position
+
+        with self.page_range_lock:
+            self.tps += 1
+        return True
+    
+    def read_tail_record_column(self, logical_rid, column) -> int:
+        '''Retrieves column value from tail pages and marks buffer frame as accessed'''
+        pg_idx, pg_pos = self.get_column_location(logical_rid, column)
+        value = self.bufferpool.read_page_slot(self.page_range_index, column, pg_idx, pg_pos)
+        frame_id = self.bufferpool.get_page_frame_num(self.page_range_index, column, pg_idx)
+        self.bufferpool.mark_frame_used(frame_id)
+        return value
+    
+    def copy_base_record(self, page_index, page_slot) -> list:
+        '''Retrieves complete record data from base pages for merge operations'''
+        record_data = [None] * self.total_num_columns
+        
+        # Fetch all column values
+        for col_idx in range(self.total_num_columns):
+            record_data[col_idx] = self.bufferpool.read_page_slot(self.page_range_index, col_idx, page_index, page_slot)
+
+        # Update frame access metadata
+        for col_idx in range(self.total_num_columns):
+            frame_id = self.bufferpool.get_page_frame_num(self.page_range_index, col_idx, page_index)
+            self.bufferpool.mark_frame_used(frame_id)
+
+        return record_data
+    
+    def find_records_last_logical_rid(self, logical_rid):
+        '''Traverses update chain to find most recent version of a record'''
+        latest_rid = logical_rid
+        while (logical_rid >= MAX_RECORD_PER_PAGE_RANGE):
+            latest_rid = logical_rid
+            pg_idx, pg_pos = self.get_column_location(logical_rid, INDIRECTION_COLUMN)
+            logical_rid = self.bufferpool.read_page_slot(self.page_range_index, INDIRECTION_COLUMN, pg_idx, pg_pos)
+            frame_id = self.bufferpool.get_page_frame_num(self.page_range_index, INDIRECTION_COLUMN, pg_idx)
+            if (frame_id):
+                self.bufferpool.mark_frame_used(frame_id)
+
+        return latest_rid
+
+    # Serialization methods
+    
+    def serialize(self):
+        '''Converts page range state to serializable dictionary format'''
+        return {
+            "logical_directory": self.logical_directory,
+            "tail_page_index": self.tail_page_index,
+            "logical_rid_index": self.logical_rid_index,
+            "tps": self.tps
+        }
+    
+    def deserialize(self, json_data):
+        '''Reconstructs page range state from serialized data'''
+        self.logical_directory = {int(k): v for k, v in json_data["logical_directory"].items()}
+        self.tail_page_index = json_data["tail_page_index"]
+        self.logical_rid_index = json_data["logical_rid_index"]
+        self.tps = json_data["tps"]
+
+    # Magic methods
+    
+    def __hash__(self):
+        return self.page_range_index
+    
+    def __eq__(self, other:Type['PageRange']):
+        return self.page_range_index == other.page_range_index
+    
+    def __str__(self):
+        return json.dumps(self.serialize())
+
+    def __repr__(self):
+        return json.dumps(self.serialize())
+    
     

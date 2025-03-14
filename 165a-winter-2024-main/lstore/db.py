@@ -1,93 +1,104 @@
+import os
+import json
+import atexit
+import shutil
 from lstore.table import Table
-import msgpack
+from lstore.index import Index
 from BTrees.OOBTree import OOBTree
+from lstore.lock import LockManager
 
-class Database:
-    """
-    Database class that manages all tables
-    """
-    def __init__(self):
-        self.tables = OOBTree()  # Dictionary mapping table names to Table objects
-        self.path = None  # File prefix for persistence
+class Database():
 
-    # Not required for milestone1
-    def open(self, path):
-        """Loads database metadata and record data from disk; reconstructs tables."""
+    def __init__(self, path="ECS165 DB"):
+        self.tables:dict = {}
         self.path = path
-        try:
-            with open(path + "_index.msgpack", "rb") as file:
-                data = file.read()
-                if not data:
-                    self.tables = OOBTree()
-                else:
-                    metadata = msgpack.unpackb(data, raw=False)
-                    # Handle old list format by ignoring metadata.
-                    if isinstance(metadata, dict):
-                        self.tables = OOBTree()
-                        from lstore.table import Table
-                        for name, info in metadata.items():
-                            table = Table(name, info[0], info[1])
-                            # NEW: Load table records from disk
-                            table.load_records(path)
-                            # Removed table.reset() to retain loaded records.
-                            self.tables[name] = table
-                    else:
-                        self.tables = OOBTree()
-        except FileNotFoundError:
-            self.tables = OOBTree()
-
-    def close(self):
-        """Saves the database metadata and record data to disk using msgpack."""
-        if self.path:
-            # Persist table metadata instead of entire Table objects.
-            metadata = {name: [table.num_columns, table.key] for name, table in self.tables.items()}
-            with open(self.path + "_index.msgpack", "wb") as file:
-                file.write(msgpack.packb(metadata, use_bin_type=True))
-            # NEW: Persist each table’s record data
-            for table in self.tables.values():
-                table.persist_records(self.path)
-
-    """
-    # Creates a new table
-    :param name: string         #Table name
-    :param num_columns: int     #Number of Columns: all columns are integer
-    :param key: int             #Index of table key in columns
-    """
-    def create_table(self, name, num_columns, key_index):
-
-        # If table exists, return existing table
-        if name in self.tables: 
-            print("Table already exists")
-            return self.tables[name]
-        
-        # Create table
-        table = Table(name, num_columns, key_index)
-        self.tables[name] = table
-        self.close()  # Save metadata changes
-
-        # Return table
-        return table
-
-    """
-    # Deletes the specified table
-    :param name: string         #Table name
-    """
-    def drop_table(self, name):
-        
-        # If table does not exist, return
-        if name not in self.tables:
-            print("Table does not exist")
-            return
-        Table.delete_data(self.path, name)  # Delete stored table data
-        del self.tables[name]
-        self.close()  # Save metadata changes
-
-
+        self.no_path_set = True
+        atexit.register(self.__cleanup_db_directory)
+        self.lock = Lock_Manager()
     
     """
-    # Returns table with the passed name
-    :param name: string         #Table name
+    # Fetches an existing table from the database
     """
     def get_table(self, name):
-
+        if self.tables.get(name) is None:
+            raise NameError(f"Cannot retrieve table! The requested table does not exist: {name}")
+        
         return self.tables[name]
+    
+    """
+    # Establishes a new table in the database
+    :param name: string         #Identifier for the table
+    :param num_columns: int     #Total column count (integer values only)
+    :param key_index: int       #Position of primary key column
+    """
+    def create_table(self, name, num_columns, key_index):
+        if self.tables.get(name) is not None:
+            raise NameError(f"Cannot create table! A table with this name already exists: {name}")
+
+        self.tables[name] = Table(name, num_columns, key_index, self.path, self.lock)
+        return self.tables[name]
+    
+    """
+    # Removes the specified table from the database
+    """
+    def drop_table(self, name):
+        if self.tables.get(name) is None:
+            raise NameError(f"Cannot drop table! The specified table does not exist: {name}")
+        
+        del self.tables[name]
+
+    def open(self, path):
+        """Initializes database from storage and reconstructs tables with their data"""
+        self.path = path
+        self.no_path_set = False
+
+        # ensure database directory exists
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        atexit.unregister(self.__cleanup_db_directory)
+        
+        # retrieve stored table configurations
+        # skipped during first-time initialization - close() will create tables.json
+        db_config_file = os.path.join(path, "tables.json")
+        if os.path.exists(db_config_file):
+            with open(db_config_file, "r") as config_file:
+                stored_tables_data = json.load(config_file)
+
+                # reconstruct each table from stored configuration
+                for tbl_name, tbl_config in stored_tables_data.items():
+                    tbl_instance = Table(tbl_name, tbl_config["num_columns"], tbl_config["key_index"], self.path, self.lock)
+                    self.tables[tbl_name] = tbl_instance
+
+                    # populate table with stored metadata
+                    tbl_instance.deserialize(tbl_config)
+
+    def close(self):
+        """Persists database state to disk and releases resources"""
+        # if self.no_path_set:
+        #     raise ValueError("Database path is not set. Use open() before closing.")
+        
+        db_config = {}
+
+        for tbl_name, tbl_instance in self.tables.items():
+            # persist any pending changes to storage
+            tbl_instance.bufferpool.unload_all_frames()
+
+            # capture table configuration
+            db_config[tbl_name] = tbl_instance.serialize()
+
+            # release memory resources
+            tbl_instance.bufferpool = None
+
+        # write consolidated database configuration
+        db_config_file = os.path.join(self.path, "tables.json")
+        with open(db_config_file, "w", encoding="utf-8") as config_file:
+            json.dump(db_config, config_file, indent=4)
+
+        # clear in-memory table references
+        self.tables = {}
+    
+    def __cleanup_db_directory(self):
+        if os.path.exists(self.path):
+            shutil.rmtree(self.path)
+
