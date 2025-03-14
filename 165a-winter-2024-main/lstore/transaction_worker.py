@@ -1,6 +1,6 @@
 from lstore.table import Table, Record
 from lstore.index import Index
-import lstore.lock import LockManager
+from lstore.lock import LockManager
 import threading
 import logging
 
