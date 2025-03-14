@@ -5,6 +5,7 @@ import json
 import threading
 from queue import Queue
 from typing import List, Union
+from lstore.lock import Latch
 
 
 class BufferPool:
@@ -12,8 +13,9 @@ class BufferPool:
         self.frame_directory = dict()  # Maps page paths to frame numbers
         self.num_frames = MAX_NUM_FRAME * (num_columns + NUM_HIDDEN_COLUMNS)
         
-        # Frame attributes (previously stored in Frame class)
-        self.frame_pins = [0] * self.num_frames  # Pin counts for each frame
+        # Frame attributes
+        self.pin = Latch()
+        self.frame_pins = self.pin.count * self.num_frames  # Pin counts for each frame
         self.frame_pages = [None] * self.num_frames  # Page objects for each frame
         self.frame_page_paths = [None] * self.num_frames  # Page paths for each frame
         self.frame_dirty_bits = [False] * self.num_frames  # Dirty flags for each frame
@@ -32,7 +34,7 @@ class BufferPool:
         for i in range(self.num_frames):
             self.available_frames_queue.put(i)
     
-    # Frame management methods (previously in Frame class)
+    # Frame management methods
     def _load_page_to_frame(self, frame_num, page_path):
         '''Loads a page from disk to the specified frame'''
         
@@ -98,7 +100,6 @@ class BufferPool:
         page_frame_num = self.frame_directory.get(page_disk_path, None)
 
         if (page_frame_num is None):
-            # If no frames are available and we were unable to diallocate frames due to lock then returns None
             if (self.available_frames_queue.empty() and not self.__replacement_policy()):
                 return None
             
@@ -116,7 +117,6 @@ class BufferPool:
             page_frame_num = self.frame_directory.get(page_disk_path, None)
 
             if (page_frame_num is None):
-                # If no frames are available and we were unable to diallocate frames due to lock then returns None
                 if (self.available_frames_queue.empty() and not self.__replacement_policy()):
                     return None
                 
@@ -229,8 +229,6 @@ class BufferPool:
             frame_num = self.unavailable_frames_queue.get()
 
             if (self.frame_pins[frame_num] == 0):
-                #print(f"deleting {self.frame_page_paths[frame_num]} from frame_directory")
-                # If the frame is not being used by any processes then we can deallocate it
                 del self.frame_directory[self.frame_page_paths[frame_num]]
                 self._unload_page_from_frame(frame_num)
                 self.available_frames_queue.put(frame_num)
