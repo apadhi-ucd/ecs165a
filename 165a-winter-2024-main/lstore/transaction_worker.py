@@ -40,11 +40,13 @@ class TransactionWorker:
         if self.worker_thread is not None:
             self.worker_thread.join()
 
+        return self.result
+
 
     def __run(self):
         transactions_list = list(self.transactions if len(self.transactions) > 0 else [None])
 
-        for transaction in self.transactions:
+        for transaction in transactions_list:
             result = None
             result = transaction.run()
             self.stats.append(result)
