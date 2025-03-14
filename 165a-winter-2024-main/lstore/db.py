@@ -14,7 +14,7 @@ class Database():
         self.path = path
         self.no_path_set = True
         atexit.register(self.__cleanup_db_directory)
-        self.lock = Lock_Manager()
+        self.lock = LockManager()
     
     """
     # Fetches an existing table from the database
