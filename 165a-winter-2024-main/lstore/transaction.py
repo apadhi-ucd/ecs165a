@@ -244,34 +244,99 @@ class Transaction:
             
 
         return self.commit()
-    
-    
+
+
 class TransactionLog:
-    def __init__(self, log_file="transaction_log.pkl"):
-        self.log_file = log_file
-        self.transactions = {}
-
-    def log_operation(self, transaction_id, table_name, operation, record_id, pre_args=None, post_args=None):
-        log_entry = {
+    """
+    Manages transaction logging for recovery and rollback operations.
+    Stores transaction history in memory and provides methods for
+    adding, retrieving, and removing transaction logs.
+    """
+    
+    def __init__(self, persistence_file_path="transaction_log.pkl"):
+        """Initialize a new transaction log with an empty history dictionary."""
+        self.persistence_file_path = persistence_file_path
+        self.transaction_history = {}
+        
+    def get_transaction_log(self, tx_id):
+        """
+        Retrieve the log entries for a specific transaction.
+        
+        Args:
+            tx_id: The transaction identifier
+            
+        Returns:
+            A list of log entries or an empty list if transaction not found
+        """
+        return self.transaction_history.get(tx_id, [])
+        
+    def remove_transaction(self, tx_id):
+        """
+        Remove a transaction's log entries from history.
+        
+        Args:
+            tx_id: The transaction identifier to remove
+        """
+        if tx_id in self.transaction_history:
+            del self.transaction_history[tx_id]
+            
+    def _create_transaction_entry(self, tx_id, table_identifier, operation_type, 
+                                 record_identifier, previous_state, new_state):
+        """
+        Create a new transaction log entry.
+        
+        Args:
+            tx_id: Transaction identifier
+            table_identifier: Table being modified
+            operation_type: Type of operation (insert, update, delete)
+            record_identifier: Record ID being affected
+            previous_state: State before operation
+            new_state: State after operation
+            
+        Returns:
+            A dictionary containing the transaction entry
+        """
+        return {
             "timestamp": datetime.now(),
-            "transaction_id": transaction_id,
-            "table":table_name,
-            "operation": operation,
-            "record_id": record_id,
-            "pre_args": pre_args,
-            "post_args": post_args
+            "transaction_id": tx_id,
+            "table": table_identifier,
+            "operation": operation_type,
+            "record_id": record_identifier,
+            "pre_args": previous_state,
+            "post_args": new_state
         }
-
-        if transaction_id not in self.transactions:
-            self.transactions[transaction_id] = []
+    
+    def _ensure_transaction_exists(self, tx_id):
+        """
+        Ensure a transaction entry exists in the history.
         
-        self.transactions[transaction_id].append(log_entry)
-
-
-    def get_transaction_log(self, transaction_id):
+        Args:
+            tx_id: Transaction identifier
+        """
+        if tx_id not in self.transaction_history:
+            self.transaction_history[tx_id] = []
+            
+    def log_operation(self, tx_id, table_identifier, operation_type, 
+                     record_identifier, previous_state=None, new_state=None):
+        """
+        Log a transaction operation.
         
-        return self.transactions.get(transaction_id, [])
-
-    def remove_transaction(self, transaction_id):
-        if transaction_id in self.transactions:
-            del self.transactions[transaction_id]
+        Args:
+            tx_id: Transaction identifier
+            table_identifier: Table being modified
+            operation_type: Type of operation (insert, update, delete)
+            record_identifier: Record ID being affected
+            previous_state: State before operation (optional)
+            new_state: State after operation (optional)
+        """
+        # Create the transaction entry
+        transaction_entry = self._create_transaction_entry(
+            tx_id, table_identifier, operation_type, 
+            record_identifier, previous_state, new_state
+        )
+        
+        # Ensure transaction exists in history
+        self._ensure_transaction_exists(tx_id)
+        
+        # Add entry to transaction history
+        self.transaction_history[tx_id].append(transaction_entry)
