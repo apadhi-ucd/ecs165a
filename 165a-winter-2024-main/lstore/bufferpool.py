@@ -7,7 +7,6 @@ from queue import Queue
 from typing import List, Union
 
 
-# Custom JSON parsing functions to replace json module
 def _parse_string(s, idx):
     """Parse a JSON string starting at index idx"""
     start_idx = idx
