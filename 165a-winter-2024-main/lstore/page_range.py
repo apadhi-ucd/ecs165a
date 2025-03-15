@@ -1,9 +1,13 @@
 import threading
 from lstore.config import *
-from lstore.bufferpool import BufferPool
-import json
+from lstore.bufferpool import BufferPool, json_load, json_dump, _stringify_value
 from typing import Type
 import queue
+
+# Custom JSON dumps function to replace json.dumps
+def json_dumps(obj):
+    """Convert a Python object to a JSON string"""
+    return _stringify_value(obj)
 
 class MergeRequest:
     def __init__(self, page_range_idx, turn_off=False):
@@ -138,9 +142,9 @@ class PageRange:
         return self.page_range_index == other.page_range_index
     
     def __str__(self):
-        return json.dumps(self.serialize())
+        return json_dumps(self.serialize())
 
     def __repr__(self):
-        return json.dumps(self.serialize())
+        return json_dumps(self.serialize())
     
     

@@ -2,10 +2,204 @@ from lstore.config import MAX_NUM_FRAME, NUM_HIDDEN_COLUMNS
 from lstore.page import Page
 from lstore.lock import Latch
 import os
-import json
 import threading
 from queue import Queue
 from typing import List, Union
+
+
+# Custom JSON parsing functions to replace json module
+def _parse_string(s, idx):
+    """Parse a JSON string starting at index idx"""
+    start_idx = idx
+    idx += 1  # Skip opening quote
+    result = ""
+    while idx < len(s) and s[idx] != '"':
+        if s[idx] == '\\' and idx + 1 < len(s):
+            idx += 1
+            if s[idx] == 'n': result += '\n'
+            elif s[idx] == 'r': result += '\r'
+            elif s[idx] == 't': result += '\t'
+            elif s[idx] == 'b': result += '\b'
+            elif s[idx] == 'f': result += '\f'
+            else: result += s[idx]
+        else:
+            result += s[idx]
+        idx += 1
+    return result, idx + 1  # Skip closing quote
+
+def _parse_number(s, idx):
+    """Parse a JSON number starting at index idx"""
+    start_idx = idx
+    while idx < len(s) and (s[idx].isdigit() or s[idx] in '.-+eE'):
+        idx += 1
+    num_str = s[start_idx:idx]
+    if '.' in num_str or 'e' in num_str.lower():
+        return float(num_str), idx
+    else:
+        return int(num_str), idx
+
+def _parse_value(s, idx):
+    """Parse a JSON value starting at index idx"""
+    while idx < len(s) and s[idx].isspace():
+        idx += 1
+    
+    if idx >= len(s):
+        raise ValueError("Unexpected end of JSON data")
+    
+    if s[idx] == '{':
+        return _parse_object(s, idx)
+    elif s[idx] == '[':
+        return _parse_array(s, idx)
+    elif s[idx] == '"':
+        return _parse_string(s, idx)
+    elif s[idx].isdigit() or s[idx] == '-':
+        return _parse_number(s, idx)
+    elif s[idx:idx+4] == 'true':
+        return True, idx + 4
+    elif s[idx:idx+5] == 'false':
+        return False, idx + 5
+    elif s[idx:idx+4] == 'null':
+        return None, idx + 4
+    else:
+        raise ValueError(f"Invalid JSON at position {idx}: {s[idx:idx+10]}")
+
+def _parse_object(s, idx):
+    """Parse a JSON object starting at index idx"""
+    result = {}
+    idx += 1  # Skip opening brace
+    
+    # Skip whitespace
+    while idx < len(s) and s[idx].isspace():
+        idx += 1
+    
+    if idx < len(s) and s[idx] == '}':
+        return result, idx + 1
+    
+    while idx < len(s):
+        # Parse key
+        while idx < len(s) and s[idx].isspace():
+            idx += 1
+        
+        if s[idx] != '"':
+            raise ValueError(f"Expected string key at position {idx}")
+        
+        key, idx = _parse_string(s, idx)
+        
+        # Skip whitespace and colon
+        while idx < len(s) and s[idx].isspace():
+            idx += 1
+        
+        if idx >= len(s) or s[idx] != ':':
+            raise ValueError(f"Expected ':' at position {idx}")
+        
+        idx += 1  # Skip colon
+        
+        # Parse value
+        value, idx = _parse_value(s, idx)
+        result[key] = value
+        
+        # Skip whitespace
+        while idx < len(s) and s[idx].isspace():
+            idx += 1
+        
+        if idx >= len(s):
+            raise ValueError("Unexpected end of JSON data")
+        
+        if s[idx] == '}':
+            return result, idx + 1
+        
+        if s[idx] != ',':
+            raise ValueError(f"Expected ',' or '}}' at position {idx}")
+        
+        idx += 1  # Skip comma
+    
+    raise ValueError("Unexpected end of JSON data")
+
+def _parse_array(s, idx):
+    """Parse a JSON array starting at index idx"""
+    result = []
+    idx += 1  # Skip opening bracket
+    
+    # Skip whitespace
+    while idx < len(s) and s[idx].isspace():
+        idx += 1
+    
+    if idx < len(s) and s[idx] == ']':
+        return result, idx + 1
+    
+    while idx < len(s):
+        # Parse value
+        value, idx = _parse_value(s, idx)
+        result.append(value)
+        
+        # Skip whitespace
+        while idx < len(s) and s[idx].isspace():
+            idx += 1
+        
+        if idx >= len(s):
+            raise ValueError("Unexpected end of JSON data")
+        
+        if s[idx] == ']':
+            return result, idx + 1
+        
+        if s[idx] != ',':
+            raise ValueError(f"Expected ',' or ']' at position {idx}")
+        
+        idx += 1  # Skip comma
+    
+    raise ValueError("Unexpected end of JSON data")
+
+def json_load(file):
+    """Load JSON data from a file-like object"""
+    content = file.read()
+    value, _ = _parse_value(content, 0)
+    return value
+
+def _stringify_value(value, indent=None, level=0):
+    """Convert a Python value to a JSON string"""
+    if value is None:
+        return "null"
+    elif value is True:
+        return "true"
+    elif value is False:
+        return "false"
+    elif isinstance(value, (int, float)):
+        return str(value)
+    elif isinstance(value, str):
+        # Escape special characters
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        escaped = escaped.replace('\n', '\\n').replace('\r', '\\r')
+        escaped = escaped.replace('\t', '\\t').replace('\b', '\\b').replace('\f', '\\f')
+        return f'"{escaped}"'
+    elif isinstance(value, list):
+        if not value:
+            return "[]"
+        
+        if indent is None:
+            items = [_stringify_value(item, indent) for item in value]
+            return f"[{','.join(items)}]"
+        else:
+            next_level = level + 1
+            items = [f"{' ' * (next_level * indent)}{_stringify_value(item, indent, next_level)}" for item in value]
+            return "[" + "\n" + ",\n".join(items) + "\n" + (' ' * (level * indent)) + "]"
+    elif isinstance(value, dict):
+        if not value:
+            return "{}"
+        
+        if indent is None:
+            items = [f"{_stringify_value(k, indent)}:{_stringify_value(v, indent)}" for k, v in value.items()]
+            return f"{{{','.join(items)}}}"
+        else:
+            next_level = level + 1
+            items = [f"{' ' * (next_level * indent)}{_stringify_value(k, indent)}:{' '}{_stringify_value(v, indent, next_level)}" for k, v in value.items()]
+            return "{" + "\n" + ",\n".join(items) + "\n" + (' ' * (level * indent)) + "}"
+    else:
+        raise TypeError(f"Object of type {type(value)} is not JSON serializable")
+
+def json_dump(obj, file, indent=None):
+    """Serialize obj as a JSON formatted stream to file"""
+    json_str = _stringify_value(obj, indent)
+    file.write(json_str)
 
 
 class BufferPool:
@@ -40,7 +234,7 @@ class BufferPool:
             
             if os.path.exists(page_path):
                 with open(page_path, "r", encoding="utf-8") as page_file:
-                    page_json_data = json.load(page_file)
+                    page_json_data = json_load(page_file)
                 self.frame_pages[frame_num].deserialize(page_json_data)
             else:
                 os.makedirs(os.path.dirname(page_path), exist_ok=True)
@@ -55,7 +249,7 @@ class BufferPool:
             if self.frame_dirty_bits[frame_num]:
                 with open(self.frame_page_paths[frame_num], "w", encoding="utf-8") as page_json_file:
                     page_data = self.frame_pages[frame_num].serialize()
-                    json.dump(page_data, page_json_file)
+                    json_dump(page_data, page_json_file)
             
             self.frame_dirty_bits[frame_num] = False
             self.frame_pages[frame_num] = None

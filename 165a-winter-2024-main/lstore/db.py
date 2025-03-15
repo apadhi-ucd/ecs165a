@@ -1,11 +1,11 @@
 import os
-import json
 import atexit
 import shutil
 from lstore.table import Table
 from lstore.index import Index
 from BTrees.OOBTree import OOBTree
 from lstore.lock import LockManager
+from lstore.bufferpool import json_load, json_dump
 
 class Database():
 
@@ -63,7 +63,7 @@ class Database():
         db_config_file = os.path.join(path, "tables.json")
         if os.path.exists(db_config_file):
             with open(db_config_file, "r") as config_file:
-                stored_tables_data = json.load(config_file)
+                stored_tables_data = json_load(config_file)
 
                 # reconstruct each table from stored configuration
                 for tbl_name, tbl_config in stored_tables_data.items():
@@ -93,7 +93,7 @@ class Database():
         # write consolidated database configuration
         db_config_file = os.path.join(self.path, "tables.json")
         with open(db_config_file, "w", encoding="utf-8") as config_file:
-            json.dump(db_config, config_file, indent=4)
+            json_dump(db_config, config_file, indent=4)
 
         # clear in-memory table references
         self.tables = {}
