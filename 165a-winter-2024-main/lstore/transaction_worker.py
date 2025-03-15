@@ -5,34 +5,32 @@ import threading
 import logging
 
 class TransactionWorker:
-
+    
     """
     # Creates a transaction worker object.
     """
-    def __init__(self, transactions = []):
+    def __init__(self, transactions = None):
         self.stats = []
-        self.transactions = transactions
+        self.transactions = transactions if transactions is not None else []
         self.result = 0
         self.worker_thread = None
         self.lock = threading.Lock()
-        self.transaction_errors = {}
+        self.transaction_errors = {} 
 
-    
+
     """
     Appends t to transactions
     """
     def add_transaction(self, t):
         self.transactions.append(t)
-
-        
+    
     """
     Runs all transaction as a thread
     """
     def run(self):
-        self.worker_thread = threading.Thread(target=self.__run)
+        self.worker_thread = threading.Thread(target = self.__run)
         self.worker_thread.start()
     
-
     """
     Waits for the worker to finish
     """
@@ -41,15 +39,15 @@ class TransactionWorker:
             self.worker_thread.join()
 
         return self.result
-
-
+    
     def __run(self):
-        transactions_list = list(self.transactions if len(self.transactions) > 0 else [None])
 
-        for transaction in transactions_list:
-            result = None
-            result = transaction.run()
-            self.stats.append(result)
-        # stores the number of transactions that committed
+        pending_transactions = list(self.transactions) if len(self.transactions) > 0 else []
+        
+        for current_transaction in pending_transactions:
+            transaction_result = None
+            
+            transaction_result = current_transaction.run()
+            self.stats.append(transaction_result)
+
         self.result = len(list(filter(lambda x: x, self.stats)))
-
