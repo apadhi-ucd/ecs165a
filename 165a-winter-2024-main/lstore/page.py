@@ -1,47 +1,50 @@
-import lstore.config as config
+from lstore.config import *
+import struct
+import base64
+import zlib
 
 class Page:
-
     def __init__(self):
-        self.num_records = 0                    
-        self.data = bytearray(config.PAGE_SIZE) 
-
-    """
-    Returns true if the page has capacity to store another record
-    """
-    def has_capacity(self):
-        return self.num_records < config.PAGE_CAPACITY
-
-    """
-    Writes an integer value to the page
-    :param value: int - Integer value to write
-    """
-    def write(self, value):
-        # Write the value to the page
-        if not self.has_capacity():
-            return False
-        
-        # Calculate the offset
-        offset = self.num_records * 8
-        
-        # Write the value to the page
-        value_bytes = value.to_bytes(8, byteorder='big', signed=True)
-        self.data[offset:offset+8] = value_bytes
-        self.num_records += 1
-        return True
+        self.entry_count = 0
+        self.content = bytearray(PAGE_SIZE)
     
-    """
-    Reads an integer value from the page
-    :param index: int - Index of the record to read
-    """
-    def read(self, index):
-        # Read the value from the page
-        if index >= self.num_records:
-            return None
-            
-        # Calculate the offset
-        offset = index * 8
-
-        # Read the value from the page
-        value_bytes = self.data[offset:offset+8]
-        return int.from_bytes(value_bytes, byteorder='big', signed=True)
+    def has_capacity(self):
+        """Check if page can store additional records"""
+        return self.entry_count < MAX_RECORD_PER_PAGE
+    
+    def write(self, value):
+        """Append a new integer value to the page and return its index"""
+        struct.pack_into("i", self.content, self.entry_count * INTEGER_BYTE_SIZE, value)
+        self.entry_count += 1
+        return (self.entry_count - 1)
+    
+    def write_precise(self, position, value):
+        """
+        Write an integer value at a specific position in the page.
+        Used for updating values like indirection pointers in base pages.
+        """
+        struct.pack_into("i", self.content, position * INTEGER_BYTE_SIZE, value)
+    
+    def get(self, position):
+        """Retrieve the integer value stored at the specified position"""
+        return struct.unpack_from("i", self.content, position * INTEGER_BYTE_SIZE)[0]
+    
+    def serialize(self):
+        """
+        Convert page data to a serializable format.
+        Returns a dictionary with compressed page data in base64 encoding.
+        """
+        compressed_content = zlib.compress(self.content)
+        return {
+            "entry_count": self.entry_count,
+            "content": base64.b64encode(compressed_content).decode('utf-8')
+        }
+    
+    def deserialize(self, serialized_data):
+        """
+        Restore page from serialized data.
+        Unpacks the compressed base64-encoded content back into page.
+        """
+        self.entry_count = serialized_data["entry_count"]
+        compressed_content = base64.b64decode(serialized_data["content"])
+        self.content = bytearray(zlib.decompress(compressed_content))
